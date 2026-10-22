@@ -147,8 +147,32 @@ The stream emits `query` (the search query actually used) → `sources` (ranked 
 php artisan rag:reindex            # re-chunk + re-embed everything
 php artisan rag:reindex --stale    # only documents embedded with a different model
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
-php artisan test                   # 37 tests, no network calls
+php artisan rag:eval               # retrieval quality on the golden set (see below)
+php artisan rag:eval --misses      # …and list the questions hybrid search missed
+php artisan test                   # 44 tests, no network calls
 ```
+
+## Retrieval evaluation
+
+`php artisan rag:eval` measures how often retrieval finds the right passage. The golden set in [`resources/eval`](resources/eval) has seven fictional company documents (handbook, product manuals, policies, a runbook) and 56 questions. Each question names the document and a phrase the retrieved chunk must contain, so the set doesn't depend on chunk size. The documents deliberately overlap: both product manuals have an error `E-12` that means different things, and two policies have 24-hour reporting rules.
+
+The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and hybrid retrieval. CI runs it on both databases. Results with the offline `hash` embeddings (k=6, 17 chunks):
+
+| Mode | SQLite Hit@1 | SQLite MRR | pgvector Hit@1 | pgvector MRR |
+|---|---|---|---|---|
+| Vector only | 57% | 0.691 | 57% | 0.691 |
+| Keyword only | 64% | 0.722 | 55% | 0.658 |
+| **Hybrid (RRF)** | **68%** | **0.759** | **64%** | **0.738** |
+
+Hit@1 by question type (hybrid, SQLite / pgvector): exact identifiers 88% / 76%, shared keywords 94% / 94%, paraphrases 29% / 29%.
+
+What this shows:
+
+- **Hybrid beats either single mode** on both databases, which is why it's the default.
+- **Paraphrases are the weak spot.** The `hash` baseline only matches words, so "Can I use the robot to mop up spilled water?" never reaches "the HX2 is not a wet-cleaning device". This is the gap a semantic embedding model (`EMBEDDING_PROVIDER=voyage` or `ollama`) is there to close. Re-run `rag:eval` with one to compare.
+- **Postgres full-text search is weaker on codes like `E-417`** than the PHP keyword scorer (65% vs 88% Hit@1 on exact questions, keyword only). The `english` text-search parser splits such identifiers into separate tokens.
+
+The corpus also doubles as sample documents to upload and try the app with.
 
 ## Configuration reference
 
@@ -159,7 +183,8 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
 - **No auth**: this is a single-user demo. For multi-tenant use, add a `user_id` to documents and scope every query by it.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
-- **Evaluation**: a small golden set of question → expected-chunk pairs would let you measure recall@k as chunking and retrieval settings change.
+- **Identifier search on Postgres**: the evaluation shows `to_tsvector('english', …)` handles codes like `E-417` poorly. Indexing an extra `simple`-dictionary or trigram (`pg_trgm`) column for identifiers would fix it.
+- **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 
 ## License
