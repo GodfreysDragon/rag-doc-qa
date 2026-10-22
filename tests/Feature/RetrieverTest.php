@@ -10,8 +10,10 @@ use App\Services\Rag\Retrieval\RetrievedChunk;
 use App\Services\Rag\Retrieval\Retriever;
 use App\Services\Rag\Support\Vector;
 use App\Services\Rag\VectorStores\DatabaseVectorStore;
+use App\Services\Rag\VectorStores\PgvectorStore;
 use App\Services\Rag\VectorStores\VectorStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\DB;
 use Tests\TestCase;
 
 class RetrieverTest extends TestCase
@@ -29,9 +31,13 @@ class RetrieverTest extends TestCase
         'The office security badge must be worn at all times inside the building.',
     ];
 
-    public function test_container_uses_the_portable_store_on_sqlite(): void
+    public function test_container_picks_the_vector_store_for_the_database_driver(): void
     {
-        $this->assertInstanceOf(DatabaseVectorStore::class, app(VectorStore::class));
+        $expectedStore = DB::connection()->getDriverName() === 'pgsql'
+            ? PgvectorStore::class
+            : DatabaseVectorStore::class;
+
+        $this->assertInstanceOf($expectedStore, app(VectorStore::class));
         $this->assertInstanceOf(HashEmbeddingProvider::class, app(EmbeddingProvider::class));
     }
 
