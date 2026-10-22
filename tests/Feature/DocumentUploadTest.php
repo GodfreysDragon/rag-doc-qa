@@ -6,8 +6,11 @@ use App\Enums\DocumentStatus;
 use App\Jobs\ProcessDocument;
 use App\Models\Chunk;
 use App\Models\Document;
+use App\Services\Rag\DocumentIngestor;
+use App\Services\Rag\Embeddings\EmbeddingConfigurationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
@@ -98,6 +101,30 @@ class DocumentUploadTest extends TestCase
         $this->assertSame(0, $document->chunks()->count());
     }
 
+    public function test_a_missing_embedding_api_key_fails_the_job_without_retrying(): void
+    {
+        config(['rag.embeddings.provider' => 'voyage', 'rag.embeddings.voyage.api_key' => null]);
+
+        $job = $this->queuedIngestionJob();
+        $job->handle(app(DocumentIngestor::class));
+
+        $job->assertFailedWith(new EmbeddingConfigurationException('VOYAGE_API_KEY is not set. Add it to .env or switch EMBEDDING_PROVIDER.'));
+        $job->assertNotReleased();
+    }
+
+    public function test_a_rejected_embedding_api_key_fails_the_job_without_retrying(): void
+    {
+        config(['rag.embeddings.provider' => 'voyage', 'rag.embeddings.voyage.api_key' => 'pa-invalid']);
+        Http::fake(['*' => Http::response(['detail' => 'Provided API key is invalid.'], 401)]);
+
+        $job = $this->queuedIngestionJob();
+        $job->handle(app(DocumentIngestor::class));
+
+        $job->assertFailedWith(EmbeddingConfigurationException::class);
+        $job->assertNotReleased();
+        Http::assertSentCount(1);
+    }
+
     public function test_documents_can_be_listed_and_shown(): void
     {
         $documents = Document::factory()->count(2)->ready()->create();
@@ -151,5 +178,20 @@ class DocumentUploadTest extends TestCase
         $this->artisan('rag:reindex', ['--stale' => true])->assertSuccessful();
 
         $this->assertSame('hash:512', Document::sole()->embedding_model);
+    }
+
+    /**
+     * Upload a document with the queue faked and return its ingestion job,
+     * wired to record fail/release calls instead of touching a real queue.
+     */
+    private function queuedIngestionJob(): ProcessDocument
+    {
+        Queue::fake();
+
+        $this->postJson(route('api.documents.store'), [
+            'file' => UploadedFile::fake()->createWithContent('policy.txt', 'Refunds are available for 30 days.'),
+        ])->assertCreated();
+
+        return (new ProcessDocument(Document::sole()))->withFakeQueueInteractions();
     }
 }

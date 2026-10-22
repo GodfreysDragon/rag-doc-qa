@@ -5,6 +5,7 @@ namespace App\Jobs;
 use App\Enums\DocumentStatus;
 use App\Models\Document;
 use App\Services\Rag\DocumentIngestor;
+use App\Services\Rag\Embeddings\EmbeddingConfigurationException;
 use App\Services\Rag\Extraction\UnprocessableDocumentException;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -40,7 +41,7 @@ class ProcessDocument implements ShouldBeUnique, ShouldQueue
     {
         try {
             $ingestor->ingest($this->document);
-        } catch (UnprocessableDocumentException $exception) {
+        } catch (UnprocessableDocumentException|EmbeddingConfigurationException $exception) {
             $this->fail($exception);
         }
     }
