@@ -75,3 +75,12 @@ jobs:
 
       - name: Run tests
         run: php artisan test
+
+      - name: Retrieval evaluation
+        env:
+          EMBEDDING_PROVIDER: hash
+          DB_DATABASE: ${{ matrix.database == 'sqlite' && 'database/eval.sqlite' || 'docqa' }}
+        run: |
+          if [ "$DB_CONNECTION" = sqlite ]; then touch database/eval.sqlite; fi
+          php artisan migrate:fresh --force
+          php artisan rag:eval --misses
