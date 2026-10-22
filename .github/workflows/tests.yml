@@ -7,7 +7,39 @@ on:
 
 jobs:
   tests:
+    name: tests (${{ matrix.database }})
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - database: sqlite
+            db_database: ':memory:'
+          - database: pgsql
+            db_database: docqa
+
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: docqa
+          POSTGRES_USER: docqa
+          POSTGRES_PASSWORD: docqa
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U docqa -d docqa"
+          --health-interval 5s
+          --health-retries 10
+
+    env:
+      DB_CONNECTION: ${{ matrix.database }}
+      DB_DATABASE: ${{ matrix.db_database }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_USERNAME: docqa
+      DB_PASSWORD: docqa
 
     steps:
       - uses: actions/checkout@v4
@@ -15,7 +47,7 @@ jobs:
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
-          extensions: mbstring, pdo_sqlite, zip, xml, dom, fileinfo, gd, intl
+          extensions: mbstring, pdo_sqlite, pdo_pgsql, zip, xml, dom, fileinfo, gd, intl
           coverage: none
 
       - uses: actions/setup-node@v4
@@ -38,6 +70,7 @@ jobs:
           php artisan key:generate
 
       - name: Check code style
+        if: matrix.database == 'sqlite'
         run: vendor/bin/pint --test
 
       - name: Run tests
