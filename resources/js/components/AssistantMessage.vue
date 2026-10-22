@@ -1,6 +1,7 @@
 <script setup>
 import { computed, nextTick, ref } from 'vue';
 import { renderAnswer } from '../lib/markdown';
+import { claimForCitation } from '../lib/passages';
 import SourceCard from './SourceCard.vue';
 
 const props = defineProps({
@@ -9,6 +10,7 @@ const props = defineProps({
 
 const showSources = ref(false);
 const highlighted = ref(null);
+const focus = ref(null);
 const sourceRefs = ref({});
 
 const html = computed(() => renderAnswer(props.message.content, props.message.sources.length));
@@ -32,8 +34,10 @@ async function onAnswerClick(event) {
     const id = Number(button.dataset.source);
     showSources.value = true;
     highlighted.value = id;
+
+    focus.value = { id, claim: claimForCitation(button) };
     await nextTick();
-    sourceRefs.value[id]?.$el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    sourceRefs.value[id]?.reveal();
     setTimeout(() => {
         if (highlighted.value === id) highlighted.value = null;
     }, 2000);
@@ -101,6 +105,7 @@ async function onAnswerClick(event) {
                         :source="source"
                         :cited="citedIds.has(source.id)"
                         :highlighted="highlighted === source.id"
+                        :claim="focus?.id === source.id ? focus.claim : null"
                     />
                 </div>
             </div>

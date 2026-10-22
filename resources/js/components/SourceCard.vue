@@ -1,18 +1,53 @@
 <script setup>
 import { computed, ref } from 'vue';
+import { findSupportingPassage } from '../lib/passages';
 
 const props = defineProps({
     source: { type: Object, required: true },
     cited: { type: Boolean, default: false },
     highlighted: { type: Boolean, default: false },
+    claim: { type: String, default: null },
 });
+
+const PREVIEW_LENGTH = 320;
 
 const expanded = ref(false);
+const passageEl = ref(null);
 
-const preview = computed(() => {
+const passage = computed(() => (props.claim ? findSupportingPassage(props.source.content, props.claim) : null));
+
+const parts = computed(() => {
     const text = props.source.content;
-    return expanded.value || text.length <= 320 ? text : `${text.slice(0, 320).trimEnd()}…`;
+
+    // The passage can sit past the preview cut-off, so a highlight shows the whole chunk.
+    if (passage.value) {
+        return {
+            before: text.slice(0, passage.value.start),
+            passage: text.slice(passage.value.start, passage.value.end),
+            after: text.slice(passage.value.end),
+        };
+    }
+
+    const preview = expanded.value || text.length <= PREVIEW_LENGTH ? text : `${text.slice(0, PREVIEW_LENGTH).trimEnd()}…`;
+
+    return { before: preview, passage: null, after: '' };
 });
+
+const cardEl = ref(null);
+
+/**
+ * Scroll the highlighted passage into view, or the card itself when the
+ * claim couldn't be matched to a passage.
+ */
+function reveal() {
+    if (passageEl.value) {
+        passageEl.value.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    } else {
+        cardEl.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+}
+
+defineExpose({ reveal });
 
 const similarityPct = computed(() =>
     props.source.similarity === null ? null : Math.max(0, Math.round(props.source.similarity * 100)),
@@ -21,6 +56,7 @@ const similarityPct = computed(() =>
 
 <template>
     <div
+        ref="cardEl"
         class="rounded-xl border bg-panel p-3 text-sm transition"
         :class="highlighted ? 'border-accent ring-2 ring-accent/30' : 'border-line'"
     >
@@ -49,9 +85,13 @@ const similarityPct = computed(() =>
                 </span>
             </span>
         </div>
-        <p class="mt-2 leading-relaxed whitespace-pre-line text-muted">{{ preview }}</p>
+        <p class="mt-2 leading-relaxed whitespace-pre-line text-muted">{{ parts.before }}<mark
+                v-if="parts.passage"
+                ref="passageEl"
+                class="rounded bg-accent-soft px-0.5 text-ink"
+            >{{ parts.passage }}</mark>{{ parts.after }}</p>
         <button
-            v-if="source.content.length > 320"
+            v-if="!parts.passage && source.content.length > PREVIEW_LENGTH"
             type="button"
             class="mt-1 text-xs text-accent hover:underline"
             @click="expanded = !expanded"
