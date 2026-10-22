@@ -55,7 +55,7 @@ class VoyageEmbeddingProvider implements EmbeddingProvider
     private function request(array $input, string $inputType): array
     {
         if (blank($this->apiKey)) {
-            throw new RuntimeException('VOYAGE_API_KEY is not set. Add it to .env or switch EMBEDDING_PROVIDER.');
+            throw new EmbeddingConfigurationException('VOYAGE_API_KEY is not set. Add it to .env or switch EMBEDDING_PROVIDER.');
         }
 
         $response = Http::withToken($this->apiKey)
@@ -67,8 +67,15 @@ class VoyageEmbeddingProvider implements EmbeddingProvider
                 'model' => $this->model,
                 'input_type' => $inputType,
                 'output_dimension' => $this->dimensions,
-            ])
-            ->throw();
+            ]);
+
+        if ($response->unauthorized() || $response->forbidden()) {
+            throw new EmbeddingConfigurationException(
+                "Voyage rejected the API key (HTTP {$response->status()}). Check VOYAGE_API_KEY in .env.",
+            );
+        }
+
+        $response->throw();
 
         $data = collect($response->json('data'))->sortBy('index')->values();
 
