@@ -1,9 +1,9 @@
 {
     "$schema": "https://getcomposer.org/schema.json",
-    "name": "laravel/laravel",
+    "name": "calmarusin/docqa",
     "type": "project",
-    "description": "The skeleton application for the Laravel framework.",
-    "keywords": ["laravel", "framework"],
+    "description": "RAG document Q&A: hybrid vector + keyword search with Reciprocal Rank Fusion and streaming, cited answers from Claude.",
+    "keywords": ["laravel", "rag", "pgvector", "hybrid-search", "llm", "claude", "vue"],
     "license": "MIT",
     "require": {
         "php": "^8.3",

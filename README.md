@@ -1,5 +1,8 @@
 # DocQA: RAG document Q&A
 
+[![tests](https://github.com/GodfreysDragon/rag-doc-qa/actions/workflows/tests.yml/badge.svg)](https://github.com/GodfreysDragon/rag-doc-qa/actions/workflows/tests.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Upload PDFs, Word documents, Markdown or text files and ask questions about them. Answers stream back with inline citations that link to the exact passages they came from.
 
 The retrieval pipeline is built by hand rather than with a hosted "chat with your PDF" API: text extraction, chunking, embeddings, vector + keyword search, rank fusion and prompt grounding are all in this repo.
@@ -155,3 +158,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
 - **Evaluation**: a small golden set of question → expected-chunk pairs would let you measure recall@k as chunking and retrieval settings change.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
+
+## License
+
+[MIT](LICENSE)
