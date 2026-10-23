@@ -149,7 +149,7 @@ php artisan rag:reindex --stale    # only documents embedded with a different mo
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
-php artisan test                   # 44 tests, no network calls
+php artisan test                   # 45 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -161,16 +161,16 @@ The command indexes the corpus with the real ingestion pipeline inside a databas
 | Mode | SQLite Hit@1 | SQLite MRR | pgvector Hit@1 | pgvector MRR |
 |---|---|---|---|---|
 | Vector only | 57% | 0.691 | 57% | 0.691 |
-| Keyword only | 64% | 0.722 | 55% | 0.658 |
-| **Hybrid (RRF)** | **68%** | **0.759** | **64%** | **0.738** |
+| Keyword only | 64% | 0.722 | 61% | 0.694 |
+| **Hybrid (RRF)** | **68%** | **0.759** | **68%** | **0.756** |
 
-Hit@1 by question type (hybrid, SQLite / pgvector): exact identifiers 88% / 76%, shared keywords 94% / 94%, paraphrases 29% / 29%.
+Hit@1 by question type (hybrid, SQLite / pgvector): exact identifiers 88% / 88%, shared keywords 94% / 94%, paraphrases 29% / 29%.
 
 What this shows:
 
 - **Hybrid beats either single mode** on both databases, which is why it's the default.
 - **Paraphrases are the weak spot.** The `hash` baseline only matches words, so "Can I use the robot to mop up spilled water?" never reaches "the HX2 is not a wet-cleaning device". This is the gap a semantic embedding model (`EMBEDDING_PROVIDER=voyage` or `ollama`) is there to close. Re-run `rag:eval` with one to compare.
-- **Postgres full-text search is weaker on codes like `E-417`** than the PHP keyword scorer (65% vs 88% Hit@1 on exact questions, keyword only). The `english` text-search parser splits such identifiers into separate tokens.
+- **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Keyword-only Hit@1 on exact questions was 65% (vs 88% for the PHP scorer). Indexing content with hyphens replaced by spaces raised it to 82%, and hybrid Hit@1 on Postgres from 64% to 68%.
 
 The corpus also doubles as sample documents to upload and try the app with.
 
@@ -183,7 +183,6 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
 - **No auth**: this is a single-user demo. For multi-tenant use, add a `user_id` to documents and scope every query by it.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
-- **Identifier search on Postgres**: the evaluation shows `to_tsvector('english', …)` handles codes like `E-417` poorly. Indexing an extra `simple`-dictionary or trigram (`pg_trgm`) column for identifiers would fix it.
 - **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 

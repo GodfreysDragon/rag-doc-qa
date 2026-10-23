@@ -90,6 +90,19 @@ class RetrieverTest extends TestCase
         $this->assertNotNull($results[0]->keywordScore);
     }
 
+    public function test_keyword_search_matches_hyphenated_codes(): void
+    {
+        $this->index('Vacuum Manual', [
+            'E-12: Wheel stuck. A drive wheel cannot turn.',
+            'E-417: Dock communication failure. The vacuum cannot find its dock.',
+        ]);
+
+        $results = app(VectorStore::class)->keywordSearch('What does E-417 mean?', limit: 5);
+
+        $this->assertCount(1, $results);
+        $this->assertStringContainsString('E-417', $results[0]->content);
+    }
+
     public function test_hybrid_retrieval_merges_both_rankings(): void
     {
         $this->index('Store Policy', self::POLICY);
