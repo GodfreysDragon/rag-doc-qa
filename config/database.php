@@ -97,6 +97,12 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
+            'server_options' => [
+                // pgvector >= 0.8: an HNSW scan returns its first 40 candidates (hnsw.ef_search) and
+                // filters them afterwards, so a search scoped to some documents can come back empty.
+                // Iterative scans keep walking the index until enough rows pass the filter.
+                'hnsw.iterative_scan' => env('DB_HNSW_ITERATIVE_SCAN', 'strict_order'),
+            ],
         ],
 
         'sqlsrv' => [
