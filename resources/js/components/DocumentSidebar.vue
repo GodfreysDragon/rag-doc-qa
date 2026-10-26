@@ -213,7 +213,11 @@ const statusClass = {
 
         <footer class="border-t border-line px-5 py-3 text-xs">
             <form v-if="confirmingDelete" class="space-y-2" @submit.prevent="submitDelete">
-                <p class="text-ink">Delete your account and all {{ props.documents.length }} of your documents? This can't be undone.</p>
+                <p class="text-ink">
+                    Delete your account{{
+                        props.documents.length === 0 ? '' : props.documents.length === 1 ? ' and your document' : ` and all ${props.documents.length} of your documents`
+                    }}? This can't be undone.
+                </p>
                 <input
                     v-model="deletePassword"
                     type="password"
