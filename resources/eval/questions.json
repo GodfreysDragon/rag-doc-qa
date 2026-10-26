@@ -1,5 +1,5 @@
 {
-    "description": "Golden set for `php artisan rag:eval`. Each case names the corpus file and a phrase that the retrieved chunk must contain. Categories: exact (the question contains an identifier or code from the text), keyword (the question shares the answer's key words), paraphrase (the question uses different words from the answer).",
+    "description": "Golden set for `php artisan rag:eval`. Each case names the corpus file and a phrase that the retrieved chunk must contain. Categories: exact (the question contains an identifier or code from the text), keyword (the question shares the answer's key words), paraphrase (the question uses different words from the answer). `unanswerable` lists questions the corpus does not answer; `php artisan rag:eval-answers` expects the system to say so.",
     "cases": [
         { "category": "exact", "question": "What does error E-417 mean?", "document": "hx2-robot-vacuum-manual.md", "expect": "E-417: Dock communication failure" },
         { "category": "exact", "question": "How do I fix E-12 on my vacuum?", "document": "hx2-robot-vacuum-manual.md", "expect": "E-12: Wheel stuck" },
@@ -59,5 +59,15 @@
         { "category": "paraphrase", "question": "Will I get in trouble for falling for a test scam email?", "document": "it-security-policy.md", "expect": "never to disciplinary action" },
         { "category": "paraphrase", "question": "Our support case has been open for a week with no fix. What can we do?", "document": "customer-support-sla.md", "expect": "the customer can ask for an escalation" },
         { "category": "paraphrase", "question": "Do we get money back if support answers our emergency too slowly?", "document": "customer-support-sla.md", "expect": "credit of 5 percent of the monthly fee per missed ticket" }
+    ],
+    "unanswerable": [
+        "How many days of bereavement leave do employees get?",
+        "Does Northwind offer a company pension plan?",
+        "Is there an on-site gym for employees?",
+        "Who is the CEO of Northwind Robotics?",
+        "What is the retail price of the HX2 robot vacuum?",
+        "What is the steepest slope the M1 mower can handle?",
+        "Do employees receive an annual bonus or stock options?",
+        "Can employees get a company car?"
     ]
 }

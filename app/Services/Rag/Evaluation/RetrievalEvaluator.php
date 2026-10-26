@@ -2,26 +2,18 @@
 
 namespace App\Services\Rag\Evaluation;
 
-use App\Enums\DocumentStatus;
-use App\Models\Chunk;
-use App\Models\Document;
-use App\Services\Rag\DocumentIngestor;
 use App\Services\Rag\Embeddings\EmbeddingProvider;
 use App\Services\Rag\Retrieval\RetrievedChunk;
 use App\Services\Rag\Retrieval\Retriever;
 use App\Services\Rag\VectorStores\VectorStore;
-use Illuminate\Http\File;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use InvalidArgumentException;
 
 /**
  * Measures retrieval quality against a golden set of questions.
  *
- * The corpus is indexed with the real ingestion pipeline inside a database
- * transaction that is always rolled back, so evaluating never touches the
- * user's own documents. Each question is then run through vector-only,
+ * The corpus is indexed by EvaluationCorpus inside a transaction that is
+ * always rolled back. Each question is then run through vector-only,
  * keyword-only and hybrid retrieval, recording the rank of the first chunk
  * that comes from the expected document and contains the expected phrase.
  */
@@ -30,7 +22,7 @@ class RetrievalEvaluator
     public const MODES = ['vector', 'keyword', 'hybrid'];
 
     public function __construct(
-        private readonly DocumentIngestor $ingestor,
+        private readonly EvaluationCorpus $corpus,
         private readonly EmbeddingProvider $embeddings,
         private readonly VectorStore $store,
     ) {}
@@ -42,12 +34,7 @@ class RetrievalEvaluator
      */
     public function evaluate(array $corpusFiles, array $cases, int $topK, int $candidates, int $rrfK): array
     {
-        $directory = 'eval-'.Str::uuid();
-
-        DB::beginTransaction();
-
-        try {
-            $documentIds = $this->index($corpusFiles, $directory);
+        return $this->corpus->using($corpusFiles, function (array $documentIds, int $chunkCount) use ($cases, $topK, $candidates, $rrfK): array {
             $scope = array_values($documentIds);
 
             $retrievers = [
@@ -61,9 +48,7 @@ class RetrievalEvaluator
             $results = [];
 
             foreach ($cases as $case) {
-                $documentId = $documentIds[$case['document']]
-                    ?? throw new InvalidArgumentException("Case \"{$case['question']}\" refers to [{$case['document']}], which is not in the corpus.");
-
+                $documentId = self::documentIdFor($case, $documentIds);
                 $ranks = [];
 
                 foreach ($retrievers as $mode => $retrieve) {
@@ -73,14 +58,8 @@ class RetrievalEvaluator
                 $results[] = [...$case, 'ranks' => $ranks];
             }
 
-            return [
-                'chunk_count' => Chunk::query()->whereIn('document_id', $scope)->count(),
-                'results' => $results,
-            ];
-        } finally {
-            DB::rollBack();
-            Storage::disk('local')->deleteDirectory($directory);
-        }
+            return ['chunk_count' => $chunkCount, 'results' => $results];
+        });
     }
 
     /**
@@ -103,32 +82,21 @@ class RetrievalEvaluator
     }
 
     /**
-     * @param  list<string>  $corpusFiles
-     * @return array<string, int> Corpus file name => document id.
+     * @param  array{question: string, document: string}  $case
+     * @param  array<string, int>  $documentIds
      */
-    private function index(array $corpusFiles, string $directory): array
+    public static function documentIdFor(array $case, array $documentIds): int
     {
-        $documentIds = [];
+        return $documentIds[$case['document']]
+            ?? throw new InvalidArgumentException("Case \"{$case['question']}\" refers to [{$case['document']}], which is not in the corpus.");
+    }
 
-        foreach ($corpusFiles as $file) {
-            $name = basename($file);
-
-            $document = Document::create([
-                'title' => str(pathinfo($name, PATHINFO_FILENAME))->replace(['_', '-'], ' ')->squish()->toString(),
-                'original_name' => $name,
-                'path' => Storage::disk('local')->putFileAs($directory, new File($file), $name),
-                'mime_type' => 'text/plain',
-                'size_bytes' => filesize($file),
-                // Not the file hash: the user may have uploaded the same sample file, and content_hash is unique.
-                'content_hash' => hash('sha256', "{$directory}/{$name}"),
-                'status' => DocumentStatus::Pending,
-            ]);
-
-            $this->ingestor->ingest($document);
-            $documentIds[$name] = $document->id;
-        }
-
-        return $documentIds;
+    /**
+     * Whether chunk text contains the expected phrase, ignoring case and whitespace.
+     */
+    public static function containsExpected(string $content, string $expect): bool
+    {
+        return str_contains(self::normalize($content), self::normalize($expect));
     }
 
     /**
@@ -136,10 +104,8 @@ class RetrievalEvaluator
      */
     private function rankOfExpected(array $chunks, int $documentId, string $expect): ?int
     {
-        $needle = $this->normalize($expect);
-
         foreach ($chunks as $index => $chunk) {
-            if ($chunk->documentId === $documentId && str_contains($this->normalize($chunk->content), $needle)) {
+            if ($chunk->documentId === $documentId && self::containsExpected($chunk->content, $expect)) {
                 return $index + 1;
             }
         }
@@ -147,7 +113,7 @@ class RetrievalEvaluator
         return null;
     }
 
-    private function normalize(string $text): string
+    private static function normalize(string $text): string
     {
         return Str::of($text)->lower()->squish()->toString();
     }
