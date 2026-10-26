@@ -8,7 +8,10 @@ use Anthropic\Core\Exceptions\RateLimitException;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\AskQuestionRequest;
 use App\Services\Rag\DocumentChat;
+use App\Services\Rag\TokenBudget;
 use Illuminate\Http\Client\RequestException;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Log;
 use Symfony\Component\HttpFoundation\StreamedResponse;
 use Throwable;
@@ -16,18 +19,31 @@ use Throwable;
 class ChatController extends Controller
 {
     /**
-     * Answer a question over the indexed documents as a Server-Sent Events
+     * Answer a question over the user's documents as a Server-Sent Events
      * stream: `query` → `sources` → many `text` → `done` (or `error`).
+     * Refused with 429 once the daily token budget is spent.
      */
-    public function __invoke(AskQuestionRequest $request, DocumentChat $chat): StreamedResponse
+    public function __invoke(AskQuestionRequest $request, DocumentChat $chat, TokenBudget $budget): StreamedResponse|JsonResponse
     {
+        $user = $request->user();
+
+        if ($budget->isExhausted($user)) {
+            return response()->json([
+                'message' => 'The daily usage limit has been reached. Please try again tomorrow.',
+            ], Response::HTTP_TOO_MANY_REQUESTS);
+        }
+
         $question = $request->validated('question');
         $history = $request->validated('history', []);
         $documentIds = $request->documentIds();
 
-        return response()->stream(function () use ($chat, $question, $history, $documentIds): void {
+        return response()->stream(function () use ($chat, $budget, $user, $question, $history, $documentIds): void {
             try {
                 foreach ($chat->answer($question, $history, $documentIds) as $event) {
+                    if ($event['type'] === 'done') {
+                        $budget->record($user, ($event['usage']['input_tokens'] ?? 0) + ($event['usage']['output_tokens'] ?? 0));
+                    }
+
                     $this->send($event);
 
                     if (connection_aborted()) {

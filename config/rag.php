@@ -97,4 +97,27 @@ return [
         'extensions' => ['pdf', 'docx', 'txt', 'md'],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Accounts and usage limits
+    |--------------------------------------------------------------------------
+    |
+    | Every document belongs to a user and every search is scoped to the
+    | signed-in user's documents. The limits keep an open deployment from
+    | running up an unbounded LLM bill; 0 means unlimited.
+    |
+    */
+
+    'auth' => [
+        'registration' => (bool) env('DOCQA_REGISTRATION', true),
+    ],
+
+    'limits' => [
+        'uploads_per_hour' => (int) env('RAG_UPLOADS_PER_HOUR', 30),
+        'questions_per_minute' => (int) env('RAG_QUESTIONS_PER_MINUTE', 30),
+        // LLM tokens (input + output, as reported by the model) per calendar day.
+        'daily_tokens_per_user' => (int) env('RAG_DAILY_TOKENS_PER_USER', 300000),
+        'daily_tokens_total' => (int) env('RAG_DAILY_TOKENS_TOTAL', 3000000),
+    ],
+
 ];

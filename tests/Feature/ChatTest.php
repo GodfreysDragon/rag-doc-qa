@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Document;
+use App\Models\User;
 use App\Services\Rag\Chunking\ChunkData;
 use App\Services\Rag\DocumentChat;
 use App\Services\Rag\Embeddings\EmbeddingProvider;
@@ -19,12 +20,16 @@ class ChatTest extends TestCase
 
     private FakeChatModel $llm;
 
+    private User $user;
+
     protected function setUp(): void
     {
         parent::setUp();
 
         $this->llm = new FakeChatModel;
         $this->app->instance(ChatModel::class, $this->llm);
+
+        $this->actingAs($this->user = User::factory()->create());
     }
 
     public function test_it_streams_sources_then_the_answer(): void
@@ -182,7 +187,7 @@ class ChatTest extends TestCase
      */
     private function index(string $title, array $passages, ?int $page = null): Document
     {
-        $document = Document::factory()->ready()->create(['title' => $title]);
+        $document = Document::factory()->ready()->for($this->user)->create(['title' => $title]);
 
         app(VectorStore::class)->replaceDocumentChunks(
             $document,

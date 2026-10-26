@@ -6,6 +6,7 @@ use App\Enums\DocumentStatus;
 use App\Jobs\ProcessDocument;
 use App\Models\Chunk;
 use App\Models\Document;
+use App\Models\User;
 use App\Services\Rag\DocumentIngestor;
 use App\Services\Rag\Embeddings\EmbeddingConfigurationException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -19,12 +20,16 @@ class DocumentUploadTest extends TestCase
 {
     use RefreshDatabase;
 
+    private User $user;
+
     protected function setUp(): void
     {
         parent::setUp();
 
         Storage::fake('local');
         config(['rag.chunking.size' => 300, 'rag.chunking.overlap' => 50]);
+
+        $this->actingAs($this->user = User::factory()->create());
     }
 
     public function test_uploading_a_text_file_chunks_and_embeds_it(): void
@@ -127,7 +132,7 @@ class DocumentUploadTest extends TestCase
 
     public function test_documents_can_be_listed_and_shown(): void
     {
-        $documents = Document::factory()->count(2)->ready()->create();
+        $documents = Document::factory()->count(2)->ready()->for($this->user)->create();
 
         $this->getJson(route('api.documents.index'))
             ->assertOk()

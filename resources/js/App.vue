@@ -1,77 +1,17 @@
 <script setup>
-import { computed, onMounted, ref, watch } from 'vue';
-import ChatPanel from './components/ChatPanel.vue';
-import DocumentSidebar from './components/DocumentSidebar.vue';
-import { useChat } from './composables/useChat';
-import { useDocuments } from './composables/useDocuments';
+import { onMounted } from 'vue';
+import SignIn from './components/SignIn.vue';
+import Workspace from './components/Workspace.vue';
+import { useAuth } from './composables/useAuth';
 
-const docs = useDocuments();
-const chat = useChat();
+const auth = useAuth();
 
-const selectedIds = ref(new Set());
-const sidebarOpen = ref(false);
-
-// Drop selections for documents that were deleted or are no longer ready.
-watch(docs.readyDocuments, (ready) => {
-    const readyIds = new Set(ready.map((d) => d.id));
-    selectedIds.value = new Set([...selectedIds.value].filter((id) => readyIds.has(id)));
-});
-
-const scope = computed(() => (selectedIds.value.size > 0 ? [...selectedIds.value] : null));
-
-function toggleSelected(id) {
-    const next = new Set(selectedIds.value);
-    next.has(id) ? next.delete(id) : next.add(id);
-    selectedIds.value = next;
-}
-
-function ask(question) {
-    sidebarOpen.value = false;
-    chat.ask(question, scope.value);
-}
-
-onMounted(docs.load);
+onMounted(auth.load);
 </script>
 
 <template>
-    <div class="flex h-full">
-        <!-- Mobile backdrop -->
-        <div
-            v-if="sidebarOpen"
-            class="fixed inset-0 z-30 bg-black/40 lg:hidden"
-            @click="sidebarOpen = false"
-        />
-
-        <aside
-            class="fixed inset-y-0 left-0 z-40 w-80 max-w-[85vw] border-r border-line bg-panel transition-transform lg:static lg:translate-x-0"
-            :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
-        >
-            <DocumentSidebar
-                :documents="docs.documents.value"
-                :uploads="docs.uploads.value"
-                :loading="docs.loading.value"
-                :error="docs.error.value"
-                :selected-ids="selectedIds"
-                @upload="docs.upload"
-                @dismiss-upload="docs.dismissUpload"
-                @remove="docs.remove"
-                @reprocess="docs.reprocess"
-                @toggle="toggleSelected"
-                @clear-selection="selectedIds = new Set()"
-            />
-        </aside>
-
-        <main class="flex min-w-0 flex-1 flex-col">
-            <ChatPanel
-                :messages="chat.messages.value"
-                :is-streaming="chat.isStreaming.value"
-                :ready-count="docs.readyDocuments.value.length"
-                :scope-count="selectedIds.size"
-                @ask="ask"
-                @stop="chat.stop"
-                @reset="chat.reset"
-                @open-sidebar="sidebarOpen = true"
-            />
-        </main>
-    </div>
+    <div v-if="auth.checking.value" class="grid h-full place-items-center text-sm text-muted">Loading…</div>
+    <!-- Keyed by user, so signing out and back in starts a fresh workspace (no stale chat or documents). -->
+    <Workspace v-else-if="auth.user.value" :key="auth.user.value.id" :user="auth.user.value" @sign-out="auth.logout" />
+    <SignIn v-else :login="auth.login" :register="auth.register" />
 </template>

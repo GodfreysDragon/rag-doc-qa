@@ -46,7 +46,9 @@ QUERY TIME (SSE stream)
 | **No-context short-circuit** | If nothing is retrieved, a fixed reply is returned without calling the LLM | Saves cost and avoids answers made up from general knowledge. |
 | **History** | Only conversation text is sent back, never old sources; it's normalised to alternating turns | Each turn retrieves fresh sources, and the request is always valid for the Messages API. |
 | **Ingestion** | Queued, unique, idempotent job (chunks replaced in one transaction); bad files fail permanently instead of retrying | Uploads return instantly, and retries never leave duplicate chunks behind. |
-| **Dedup** | SHA-256 of the upload | Uploading the same file twice returns the existing document. |
+| **Dedup** | SHA-256 of the upload, per user | Uploading the same file twice returns the existing document. |
+| **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. |
+| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Tokens are counted from the usage the model reports when an answer finishes. |
 | **LLM safety** | `fallbacks: "default"` server-side fallback, handling of `refusal` stop reasons, and a `reset` event if a fallback takes over mid-stream | A classifier decline is retried on another model rather than shown to the user as an empty answer. |
 
 ### Swappable components
@@ -112,20 +114,28 @@ EMBEDDING_DIMENSIONS=1024
 composer run dev     # web server + queue worker + Vite
 ```
 
-Open http://localhost:8000. Uploads are processed by the queue worker, so it has to be running.
+Open http://localhost:8000 and create an account. Uploads are processed by the queue worker, so it has to be running.
+
+Limits are set in `.env` (0 means unlimited): `RAG_UPLOADS_PER_HOUR` (30), `RAG_QUESTIONS_PER_MINUTE` (30), `RAG_DAILY_TOKENS_PER_USER` (300,000) and `RAG_DAILY_TOKENS_TOTAL` (3,000,000). Set `DOCQA_REGISTRATION=false` to stop new sign-ups.
 
 ---
 
 ## API
 
+Every endpoint except `register` and `login` needs a signed-in session. State-changing requests send the `X-XSRF-TOKEN` header from Laravel's `XSRF-TOKEN` cookie.
+
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET` | `/api/v1/documents` | List documents with status (`pending` → `processing` → `ready` / `failed`) |
+| `POST` | `/api/v1/register` | Create an account and sign in (`name`, `email`, `password`, `password_confirmation`) |
+| `POST` | `/api/v1/login` | Sign in (`email`, `password`) |
+| `POST` | `/api/v1/logout` | Sign out |
+| `GET` | `/api/v1/user` | The signed-in user, with today's token usage and limit |
+| `GET` | `/api/v1/documents` | List your documents with status (`pending` → `processing` → `ready` / `failed`) |
 | `POST` | `/api/v1/documents` | Upload (`multipart/form-data`, field `file`, optional `title`) |
 | `GET` | `/api/v1/documents/{id}` | Show one document |
 | `POST` | `/api/v1/documents/{id}/reprocess` | Re-run ingestion |
 | `DELETE` | `/api/v1/documents/{id}` | Delete the document, its file and its chunks |
-| `POST` | `/api/v1/chat` | Ask a question; responds with `text/event-stream` |
+| `POST` | `/api/v1/chat` | Ask a question; responds with `text/event-stream`, or 429 once the daily token budget is spent |
 
 `POST /api/v1/chat` body:
 
@@ -150,7 +160,7 @@ php artisan rag:reindex --queue    # dispatch to the queue instead of running in
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
 php artisan rag:eval-answers       # answer quality with the real LLM and an LLM judge (costs tokens)
-php artisan test                   # 51 tests, no network calls
+php artisan test                   # 65 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -216,7 +226,8 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 ## Limitations / next steps
 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
-- **No auth**: this is a single-user demo. For multi-tenant use, add a `user_id` to documents and scope every query by it.
+- **Accounts are basic**: email and password only, with no email verification, password reset or roles. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
+- **Token budget granularity**: the budget is checked before an answer starts, so the last answer of the day can overshoot it. Query-rewrite calls aren't counted, because the model reports usage only for the streamed answer.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
 - **Headings in chunks**: the answer evaluation found a chunk ending at a section heading, with the section's text in the next chunk. Carrying the nearest heading into each chunk (or never ending a chunk on one) would keep sections together.
 - **Weighted fusion**: with `nomic-embed-text`, equal-weight RRF costs paraphrase accuracy (see the evaluation). Per-ranking weights in `Retriever::fuse()`, tuned with `rag:eval` on a bigger golden set, would let hybrid keep the vector ranking's paraphrase wins.

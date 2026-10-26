@@ -1,3 +1,5 @@
+import { csrfHeaders, notifySignedOut } from './session';
+
 /**
  * POST a JSON body and consume a Server-Sent Events response.
  *
@@ -11,10 +13,14 @@
 export async function postEventStream(url, body, { onEvent, signal }) {
     const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...csrfHeaders() },
         body: JSON.stringify(body),
         signal,
     });
+
+    if (response.status === 401) {
+        notifySignedOut();
+    }
 
     if (!response.ok) {
         const payload = await response.json().catch(() => ({}));
