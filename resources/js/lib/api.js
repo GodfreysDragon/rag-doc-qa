@@ -51,6 +51,17 @@ export const api = {
     register: (details) =>
         request('/register', { method: 'POST', body: JSON.stringify(details), quietUnauthenticated: true }).then((body) => body.data),
 
+    /** Resolves with the same message whether or not the email has an account. */
+    forgotPassword: (email) =>
+        request('/forgot-password', { method: 'POST', body: JSON.stringify({ email }), quietUnauthenticated: true }).then((body) => body.message),
+
+    resetPassword: (details) =>
+        request('/reset-password', { method: 'POST', body: JSON.stringify(details), quietUnauthenticated: true }).then((body) => body.message),
+
+    resendVerification: () => request('/email/verification-notification', { method: 'POST' }),
+
+    deleteAccount: (password) => request('/user', { method: 'DELETE', body: JSON.stringify({ password }) }),
+
     logout: () => request('/logout', { method: 'POST' }),
 
     listDocuments: () => request('/documents').then((body) => body.data),

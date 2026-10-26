@@ -3,6 +3,7 @@
 namespace Tests\Fakes;
 
 use App\Services\Rag\Llm\ChatModel;
+use App\Services\Rag\Llm\Completion;
 use Generator;
 
 /**
@@ -16,6 +17,9 @@ class FakeChatModel implements ChatModel
 
     /** @var list<array{system: string, messages: list<array{role: string, content: string}>}> */
     public array $completeCalls = [];
+
+    /** @var list<string> Models requested through withModel(); the fake answers for all of them. */
+    public array $models = [];
 
     public function __construct(
         public string $answer = 'The refund window is 30 days [1].',
@@ -38,10 +42,20 @@ class FakeChatModel implements ChatModel
         ];
     }
 
-    public function complete(string $system, array $messages, int $maxTokens = 2000): string
+    public function withModel(string $model): ChatModel
+    {
+        $this->models[] = $model;
+
+        return $this;
+    }
+
+    /**
+     * Replies with the canned rewrite text, reporting 50 input + 5 output tokens.
+     */
+    public function complete(string $system, array $messages, int $maxTokens = 2000): Completion
     {
         $this->completeCalls[] = ['system' => $system, 'messages' => $messages];
 
-        return $this->rewrite;
+        return new Completion($this->rewrite, inputTokens: 50, outputTokens: 5);
     }
 }

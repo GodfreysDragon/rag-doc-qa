@@ -5,7 +5,7 @@
 
 Upload PDFs, Word documents, Markdown or text files and ask questions about them. Answers stream back with inline citations that link to the exact passages they came from.
 
-![DocQA: upload a document, ask a question, get a streamed answer with citations that open the source passage](.github/demo.gif)
+![DocQA: sign in, upload a document, ask a question, get a streamed answer with citations that open the source passage](.github/demo.gif)
 
 The retrieval pipeline is built by hand rather than with a hosted "chat with your PDF" API: text extraction, chunking, embeddings, vector + keyword search, rank fusion and prompt grounding are all in this repo.
 
@@ -25,7 +25,7 @@ QUERY TIME (SSE stream)
   question ─► rewrite follow-ups into a standalone query (LLM, low effort)
            ─► embed query (input_type=query)
            ─► vector search (cosine, top 20) ─┐
-           ─► keyword search (ts_rank, top 20)┴► Reciprocal Rank Fusion ─► top 6
+           ─► keyword search (ts_rank, top 20)┴► weighted score fusion ─► top 6
            ─► grounded prompt with numbered <source> blocks
            ─► Claude streams an answer citing [n] ─► Vue renders clickable citations
 ```
@@ -39,7 +39,7 @@ QUERY TIME (SSE stream)
 | **Asymmetric embeddings** | Separate `embedDocuments()` / `embedQuery()` | Retrieval models (Voyage `input_type`, nomic `search_query:` prefixes) encode short questions and long passages differently. |
 | **Normalisation** | Every vector is L2-normalised before storage | Cosine similarity becomes a dot product, which the PHP fallback relies on. |
 | **Vector index** | pgvector HNSW with `vector_cosine_ops` | Approximate nearest-neighbour search in SQL, so queries don't scan the whole table. |
-| **Hybrid search** | Dense + full-text, merged with RRF (k=60) | Embeddings blur exact tokens (SKUs, names, acronyms) and keyword search catches them. RRF only uses ranks, so cosine scores and `ts_rank` never need calibrating against each other. |
+| **Hybrid search** | Dense + full-text, merged by weighted score fusion: each list's scores scaled to 0–1, then 0.6 × vector + 0.4 × keyword. RRF (k=60) is still available with `RAG_FUSION=rrf` | Embeddings blur exact tokens (SKUs, names, acronyms) and keyword search catches them. Scaling each list to 0–1 means cosine scores and `ts_rank` never need calibrating against each other. Unlike RRF, a chunk that's the clear best on one side keeps its lead (see the evaluation). |
 | **Query rewriting** | Only when there's history | "What about the second one?" embeds badly on its own, so it's rewritten into a standalone query first. The first turn skips that LLM call. |
 | **Grounding** | Sources in tagged blocks with ids; the system prompt requires `[n]` citations, a plain "not in the documents" when the sources don't cover it, and treats source text as data | Cuts down on hallucination and prompt injection from uploaded files, and makes every claim checkable in the UI. |
 | **Citation highlighting** | Clicking `[n]` matches the claim before it against the sentences of source `n` (shared terms, numbers weighted double) and highlights the best match | A citation points at a whole ~300-token chunk; this narrows it to the sentence a reader actually needs to check. Done client-side, so it costs no extra LLM call. |
@@ -47,8 +47,8 @@ QUERY TIME (SSE stream)
 | **History** | Only conversation text is sent back, never old sources; it's normalised to alternating turns | Each turn retrieves fresh sources, and the request is always valid for the Messages API. |
 | **Ingestion** | Queued, unique, idempotent job (chunks replaced in one transaction); bad files fail permanently instead of retrying | Uploads return instantly, and retries never leave duplicate chunks behind. |
 | **Dedup** | SHA-256 of the upload, per user | Uploading the same file twice returns the existing document. |
-| **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. |
-| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Tokens are counted from the usage the model reports when an answer finishes. |
+| **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents. Email verification (enforced with `DOCQA_VERIFY_EMAIL=true`), password reset by emailed link, and account deletion that removes every document, chunk and file | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. The reset form gives the same reply whether or not an account exists, and deleting an account needs the current password. |
+| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Each question reserves an upper estimate of its cost (the longest prompt it can produce, the longest answer allowed, and the query rewrite) with an atomic increment, so questions sent at the same moment can't overshoot together. The reservation is replaced by the usage the model reports, including the rewrite call. |
 | **LLM safety** | `fallbacks: "default"` server-side fallback, handling of `refusal` stop reasons, and a `reset` event if a fallback takes over mid-stream | A classifier decline is retried on another model rather than shown to the user as an empty answer. |
 
 ### Swappable components
@@ -116,26 +116,30 @@ composer run dev     # web server + queue worker + Vite
 
 Open http://localhost:8000 and create an account. Uploads are processed by the queue worker, so it has to be running.
 
-Limits are set in `.env` (0 means unlimited): `RAG_UPLOADS_PER_HOUR` (30), `RAG_QUESTIONS_PER_MINUTE` (30), `RAG_DAILY_TOKENS_PER_USER` (300,000) and `RAG_DAILY_TOKENS_TOTAL` (3,000,000). Set `DOCQA_REGISTRATION=false` to stop new sign-ups.
+Limits are set in `.env` (0 means unlimited): `RAG_UPLOADS_PER_HOUR` (30), `RAG_QUESTIONS_PER_MINUTE` (30), `RAG_DAILY_TOKENS_PER_USER` (300,000) and `RAG_DAILY_TOKENS_TOTAL` (3,000,000). Set `DOCQA_REGISTRATION=false` to stop new sign-ups, and `DOCQA_VERIFY_EMAIL=true` to require a verified email address before uploading or asking. Verification and password-reset emails go through Laravel's mailer; the default `MAIL_MAILER=log` writes them to `storage/logs/laravel.log`, so set real SMTP details for a public deployment.
 
 ---
 
 ## API
 
-Every endpoint except `register` and `login` needs a signed-in session. State-changing requests send the `X-XSRF-TOKEN` header from Laravel's `XSRF-TOKEN` cookie.
+Every endpoint except `register`, `login`, `forgot-password` and `reset-password` needs a signed-in session. With `DOCQA_VERIFY_EMAIL=true`, the document and chat endpoints also need a verified email address (403 otherwise). State-changing requests send the `X-XSRF-TOKEN` header from Laravel's `XSRF-TOKEN` cookie.
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/v1/register` | Create an account and sign in (`name`, `email`, `password`, `password_confirmation`) |
 | `POST` | `/api/v1/login` | Sign in (`email`, `password`) |
 | `POST` | `/api/v1/logout` | Sign out |
-| `GET` | `/api/v1/user` | The signed-in user, with today's token usage and limit |
+| `POST` | `/api/v1/forgot-password` | Email a password-reset link (`email`) |
+| `POST` | `/api/v1/reset-password` | Set a new password (`token`, `email`, `password`, `password_confirmation`) |
+| `GET` | `/api/v1/user` | The signed-in user, with verification status and today's token usage and limit |
+| `DELETE` | `/api/v1/user` | Delete the account and all its documents (`password`) |
+| `POST` | `/api/v1/email/verification-notification` | Send the verification email again |
 | `GET` | `/api/v1/documents` | List your documents with status (`pending` → `processing` → `ready` / `failed`) |
 | `POST` | `/api/v1/documents` | Upload (`multipart/form-data`, field `file`, optional `title`) |
 | `GET` | `/api/v1/documents/{id}` | Show one document |
 | `POST` | `/api/v1/documents/{id}/reprocess` | Re-run ingestion |
 | `DELETE` | `/api/v1/documents/{id}` | Delete the document, its file and its chunks |
-| `POST` | `/api/v1/chat` | Ask a question; responds with `text/event-stream`, or 429 once the daily token budget is spent |
+| `POST` | `/api/v1/chat` | Ask a question; responds with `text/event-stream`, or 429 when the question's worst-case cost no longer fits in the daily token budget |
 
 `POST /api/v1/chat` body:
 
@@ -159,35 +163,37 @@ php artisan rag:reindex --stale    # only documents embedded with a different mo
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
-php artisan rag:eval-answers       # answer quality with the real LLM and an LLM judge (costs tokens)
-php artisan test                   # 69 tests, no network calls
+php artisan rag:eval-answers       # answer quality with the real LLM and an separate LLM judge (costs tokens)
+php artisan test                   # 88 tests, no network calls
 ```
 
 ## Retrieval evaluation
 
 `php artisan rag:eval` measures how often retrieval finds the right passage. The golden set in [`resources/eval`](resources/eval) has seven fictional company documents (handbook, product manuals, policies, a runbook) and 56 questions. Each question names the document and a phrase the retrieved chunk must contain, so the set doesn't depend on chunk size. The documents deliberately overlap: both product manuals have an error `E-12` that means different things, and two policies have 24-hour reporting rules.
 
-The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and hybrid retrieval. CI runs it on both databases with the offline `hash` embeddings. Results (k=6, 17 chunks):
+The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and both hybrid fusions: Reciprocal Rank Fusion (RRF) and weighted score fusion, the default. CI runs it on both databases with the offline `hash` embeddings. Results (k=6, 17 chunks):
 
 | Mode | `hash` · SQLite | `hash` · pgvector | `nomic-embed-text` (Ollama) · SQLite |
 |---|---|---|---|
-| Vector only | 57% / 0.691 | 57% / 0.691 | 63% / 0.769 |
-| Keyword only | 64% / 0.722 | 61% / 0.694 | 64% / 0.722 |
-| Hybrid (RRF) | **68% / 0.759** | **68% / 0.756** | 64% / **0.773** |
+| Vector only | 61% / 0.717 | 61% / 0.717 | 66% / 0.785 |
+| Keyword only | 68% / 0.750 | 63% / 0.722 | 68% / 0.750 |
+| Hybrid, RRF | 66% / 0.760 | 68% / **0.766** | 64% / 0.775 |
+| Hybrid, weighted (default) | **70% / 0.774** | 68% / 0.763 | **71% / 0.838** |
 
-Cells are Hit@1 / MRR. The Ollama column was run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). Hit@1 by question type:
+Cells are Hit@1 / MRR. The Ollama column was run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). With `nomic-embed-text`, weighted fusion finds the expected passage in the top 6 for all 56 questions (RRF: 53). Hit@1 by question type:
 
-| Question type | `hash` vector | `hash` hybrid | `nomic` vector | `nomic` hybrid |
-|---|---|---|---|---|
-| Exact identifiers (17) | 71% | 88% | 65% | 82% |
-| Shared keywords (18) | 94% | 94% | 61% | 72% |
-| Paraphrases (21) | 14% | 29% | **62%** | 43% |
+| Question type | `hash` vector | `hash` RRF | `hash` weighted | `nomic` vector | `nomic` RRF | `nomic` weighted |
+|---|---|---|---|---|---|---|
+| Exact identifiers (17) | 76% | 88% | **94%** | 65% | 76% | **88%** |
+| Shared keywords (18) | 94% | 94% | 94% | 83% | 83% | **94%** |
+| Paraphrases (21) | 19% | 24% | 29% | **52%** | 38% | 38% |
 
 What this shows:
 
-- **A semantic model fixes paraphrases.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed": `hash` ranks that passage 4th, `nomic-embed-text` ranks it 1st. Vector-only Hit@1 on paraphrases rises from 14% to 62%, and Hit@3 overall from 77% to 89%.
-- **Keyword search still wins on exact terms.** `nomic` vector search finds the passage first for only 65% of identifier questions and 61% of keyword questions, against 88–89% for keyword search. That's the case for hybrid retrieval.
-- **Equal-weight RRF is a trade-off with a good embedding model.** Hybrid has the best MRR and recovers identifier questions (65% → 82%), but on paraphrases the noisy keyword ranking pulls Hit@1 down from 62% to 43%. The speeding-ticket passage drops out of the hybrid top 6 altogether. Part of this is the small corpus: the 20 vector candidates cover all 17 chunks, so any chunk with a stray keyword match gets a second RRF score. Weighting the two rankings, or re-ranking the fused list, is the next thing to try (see below).
+- **A semantic model fixes paraphrases.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed", but `nomic-embed-text` ranks that passage 1st. Vector-only Hit@1 on paraphrases rises from 19% with `hash` to 52%, and Hit@3 overall from 80% to 91%.
+- **Keyword search still wins on exact terms.** `nomic` vector search finds the passage first for only 65% of identifier questions, against 88% for keyword search. That's the case for hybrid retrieval.
+- **RRF lost the vector ranking's best hits.** RRF adds 1 / (60 + rank) for each list a chunk is in, so a chunk that's mediocre in both lists beats one that's 1st in one list and absent from the other. With `nomic`, the speeding-ticket passage was 1st for vector search, had no keyword match, and fell to 9th. Part of this is the small corpus: the 20 candidates cover all 17 chunks, so almost every chunk gets a second RRF score.
+- **Weighted score fusion keeps them.** Each list's scores are scaled to 0–1 (best = 1) and combined as 0.6 × vector + 0.4 × keyword, so a clear winner on one side keeps most of its lead. With `nomic` it lifts MRR from 0.775 to 0.838 and fixes all three RRF misses. With `hash` the two fusions are close (better on SQLite, a tie on Postgres), because `hash` vectors are themselves lexical. The weight was picked from 0.5–0.9 on this golden set, so it's tuned to it; a larger set would confirm it.
 - **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Keyword-only Hit@1 on exact questions was 65% (vs 88% for the PHP scorer). Indexing content with hyphens replaced by spaces raised it to 82%, and hybrid Hit@1 on Postgres from 64% to 68%.
 
 The corpus also doubles as sample documents to upload and try the app with.
@@ -199,38 +205,38 @@ Retrieval metrics don't say whether the final answers are right. `php artisan ra
 - **Deterministic checks:** do the `[n]` citations point at sources that exist, and does a cited source contain the expected passage?
 - **An LLM judge**, given the question, the retrieved sources, the answer and the expected phrase: is the answer **correct**, and is every claim **faithful** to the sources?
 
-The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text` and `claude-opus-5-5` (64 questions, about 150k input tokens):
+The judge runs on a different model from the one that writes the answers (`RAG_JUDGE_MODEL`, default `claude-sonnet-5-5`, or `--judge=` per run), so it isn't grading its own style.
 
-| Metric | Result |
-|---|---|
-| Correct (56 answerable) | 95% (53) |
-| Faithful to the sources (all 64) | 98% |
-| Cites the expected passage | 95% |
-| Expected passage retrieved | 95% |
-| Answers citing a source that doesn't exist | 0% |
-| Says "not in the documents" when it isn't (8 unanswerable) | 100% |
+The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text`, answers from `claude-opus-5-5` (64 questions, about 150k input tokens):
+
+| Metric | First run (RRF, Opus judging itself) | Now (sections kept whole, weighted fusion, Sonnet judge) |
+|---|---|---|
+| Correct (56 answerable) | 95% (53) | **100% (56)** |
+| Faithful to the sources (all 64) | 98% (1 unfaithful) | 95% (3 unfaithful) |
+| Cites the expected passage | 95% | **100%** |
+| Expected passage retrieved | 95% | **100%** |
+| Answers citing a source that doesn't exist | 0% | 0% |
+| Says "not in the documents" when it isn't (8 unanswerable) | 100% | 100% |
 
 What this shows:
 
-- **Retrieval is the bottleneck, not generation.** Every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. When the passage was retrieved, the answer was right 53 times out of 53.
+- **Retrieval was the bottleneck, not generation.** In the first run every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. The run also found a chunk that ended at the heading "Using your own car", with the rules in the next chunk. After the chunking and fusion fixes the expected passage is retrieved for all 56 questions, and all 56 answers are correct.
 - **No made-up answers.** All 8 unanswerable questions got "the documents don't say", and no answer cited a source that doesn't exist.
-- **The one unfaithful answer** added a side remark the sources didn't support (that the mower has no Eco mode) to an otherwise correct answer.
-- **A chunking issue showed up.** For "Will the company pay my speeding ticket?" the model noticed that a retrieved chunk ended at the heading "Using your own car", with the rules in the next chunk. The chunker now packs whole Markdown sections and never ends a chunk on a heading.
+- **A separate judge is stricter.** Sonnet flagged three answers where Opus, judging its own answers, had flagged one. I checked all three by hand and agree. Each gets the main fact right, then adds an unsupported side remark about the other product or a nearby section, such as "the mower has no Eco mode". The pattern is over-answering, which a "stick to what was asked" rule in the system prompt could address.
 
-Caveat: the judge is the same model that wrote the answers, so it may be lenient towards its own style. A different judge model, or spot-checking verdicts by hand with `--failures`, guards against that.
+Spot-check the judge with `--failures`, which lists every answer marked incorrect or unfaithful with the judge's reason.
 
 ## Configuration reference
 
-All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the RRF constant, minimum similarity, query rewriting, history length, model and effort.
+All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the fusion method and vector weight, the RRF constant, minimum similarity, query rewriting, history length, model and effort, and the judge model for `rag:eval-answers`.
 
 ## Limitations / next steps
 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
-- **Accounts are basic**: email and password only, with no email verification, password reset or roles. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
-- **Token budget granularity**: the budget is checked before an answer starts, so the last answer of the day can overshoot it. Query-rewrite calls aren't counted, because the model reports usage only for the streamed answer.
+- **No roles or sharing**: every account sees only its own documents; there are no admins, teams or shared collections. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
+- **Token budget reservations are conservative**: the worst case is mostly the answer limit (`ANTHROPIC_MAX_TOKENS`, 16,000), so the last ~20k tokens of a day's budget can't be used, and a client that disconnects mid-answer keeps its whole reservation. Prompt sizes are estimated at ~4 characters per token, so text that tokenises more densely can make the estimate low.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
-- **Weighted fusion**: with `nomic-embed-text`, equal-weight RRF costs paraphrase accuracy (see the evaluation). Per-ranking weights in `Retriever::fuse()`, tuned with `rag:eval` on a bigger golden set, would let hybrid keep the vector ranking's paraphrase wins.
-- **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
+- **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size, and the fusion weight was picked on this same set. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 
 ## License

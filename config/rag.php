@@ -59,9 +59,14 @@ return [
     |--------------------------------------------------------------------------
     |
     | Hybrid retrieval runs a vector (semantic) search and a keyword (lexical)
-    | search, then fuses the two rankings with Reciprocal Rank Fusion. Keyword
-    | search rescues exact terms — product codes, names, acronyms — that dense
-    | embeddings tend to blur.
+    | search, then fuses the two rankings. Keyword search rescues exact terms —
+    | product codes, names, acronyms — that dense embeddings tend to blur.
+    |
+    | fusion: "weighted" scales each ranking's scores to 0–1 and adds them as
+    |         vector_weight · vector + (1 − vector_weight) · keyword.
+    |         "rrf" is Reciprocal Rank Fusion with constant rrf_k.
+    | On the golden set, weighted fusion with 0.6 beat RRF with both the hash
+    | and nomic-embed-text embeddings (see the README).
     |
     */
 
@@ -69,6 +74,8 @@ return [
         'top_k' => (int) env('RAG_TOP_K', 6),
         'candidates' => (int) env('RAG_CANDIDATES', 20),
         'hybrid' => (bool) env('RAG_HYBRID', true),
+        'fusion' => env('RAG_FUSION', 'weighted'),
+        'vector_weight' => (float) env('RAG_VECTOR_WEIGHT', 0.6),
         'rrf_k' => 60,
         // Minimum cosine similarity for a vector hit to be considered at all.
         'min_score' => (float) env('RAG_MIN_SCORE', 0.0),
@@ -92,6 +99,21 @@ return [
         'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 16000),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Evaluation
+    |--------------------------------------------------------------------------
+    |
+    | rag:eval-answers grades every answer with an LLM judge. A different model
+    | from the one that wrote the answers is less likely to favour its own
+    | style. Leave it empty to judge with rag.llm.model.
+    |
+    */
+
+    'evaluation' => [
+        'judge_model' => env('RAG_JUDGE_MODEL', 'claude-sonnet-5-5'),
+    ],
+
     'uploads' => [
         'max_kb' => (int) env('RAG_MAX_UPLOAD_KB', 20480),
         'extensions' => ['pdf', 'docx', 'txt', 'md'],
@@ -110,6 +132,9 @@ return [
 
     'auth' => [
         'registration' => (bool) env('DOCQA_REGISTRATION', true),
+        // Require a verified email address before uploading or asking. New accounts
+        // always get a verification email; this decides whether it's enforced.
+        'verify_email' => (bool) env('DOCQA_VERIFY_EMAIL', false),
     ],
 
     'limits' => [

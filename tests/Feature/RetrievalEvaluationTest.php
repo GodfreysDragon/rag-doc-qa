@@ -40,6 +40,7 @@ class RetrievalEvaluationTest extends TestCase
             topK: 6,
             candidates: 20,
             rrfK: 60,
+            vectorWeight: 0.6,
         );
 
         foreach (RetrievalEvaluator::MODES as $mode) {
@@ -51,7 +52,7 @@ class RetrievalEvaluationTest extends TestCase
     {
         $this->artisan('rag:eval')
             ->expectsOutputToContain('Evaluated')
-            ->expectsOutputToContain('hybrid')
+            ->expectsOutputToContain('weighted')
             ->assertSuccessful();
 
         $this->assertSame(0, Document::count());
@@ -68,6 +69,7 @@ class RetrievalEvaluationTest extends TestCase
                 topK: 6,
                 candidates: 20,
                 rrfK: 60,
+                vectorWeight: 0.6,
             );
             $this->fail('Expected an InvalidArgumentException.');
         } catch (InvalidArgumentException $exception) {

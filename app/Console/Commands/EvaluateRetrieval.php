@@ -12,9 +12,9 @@ use Illuminate\Support\Facades\DB;
 #[Signature('rag:eval
     {--set= : Path to a golden-set JSON file; its corpus is read from a corpus/ folder next to it}
     {--k= : How many chunks to retrieve per question (defaults to rag.retrieval.top_k)}
-    {--misses : List the questions that hybrid retrieval missed}
+    {--misses : List the questions that the configured hybrid fusion missed}
     {--json : Print the results as JSON instead of tables}')]
-#[Description('Measure retrieval quality (hit rate and MRR) for vector, keyword and hybrid search on a golden set')]
+#[Description('Measure retrieval quality (hit rate and MRR) for vector, keyword and hybrid (RRF and weighted) search on a golden set')]
 class EvaluateRetrieval extends Command
 {
     /**
@@ -41,6 +41,7 @@ class EvaluateRetrieval extends Command
             topK: $topK,
             candidates: max($topK, (int) config('rag.retrieval.candidates')),
             rrfK: (int) config('rag.retrieval.rrf_k'),
+            vectorWeight: (float) config('rag.retrieval.vector_weight'),
         );
 
         $summary = $this->summarise($results);
@@ -91,10 +92,11 @@ class EvaluateRetrieval extends Command
         );
 
         if ($this->option('misses')) {
-            $misses = array_filter($results, fn (array $result): bool => $result['ranks']['hybrid'] === null);
+            $fusion = config('rag.retrieval.fusion');
+            $misses = array_filter($results, fn (array $result): bool => $result['ranks'][$fusion] === null);
 
             $this->newLine();
-            $this->line(count($misses).' question(s) missed by hybrid retrieval:');
+            $this->line(count($misses)." question(s) missed by hybrid retrieval ({$fusion}):");
 
             foreach ($misses as $miss) {
                 $this->components->twoColumnDetail("[{$miss['category']}] {$miss['question']}", $miss['document']);
