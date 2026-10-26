@@ -149,7 +149,8 @@ php artisan rag:reindex --stale    # only documents embedded with a different mo
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
-php artisan test                   # 46 tests, no network calls
+php artisan rag:eval-answers       # answer quality with the real LLM and an LLM judge (costs tokens)
+php artisan test                   # 51 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -181,6 +182,33 @@ What this shows:
 
 The corpus also doubles as sample documents to upload and try the app with.
 
+## Answer evaluation
+
+Retrieval metrics don't say whether the final answers are right. `php artisan rag:eval-answers` runs every golden-set question through the whole pipeline (retrieval and Claude) and checks each answer two ways:
+
+- **Deterministic checks:** do the `[n]` citations point at sources that exist, and does a cited source contain the expected passage?
+- **An LLM judge**, given the question, the retrieved sources, the answer and the expected phrase: is the answer **correct**, and is every claim **faithful** to the sources?
+
+The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text` and `claude-opus-5-5` (64 questions, about 150k input tokens):
+
+| Metric | Result |
+|---|---|
+| Correct (56 answerable) | 95% (53) |
+| Faithful to the sources (all 64) | 98% |
+| Cites the expected passage | 95% |
+| Expected passage retrieved | 95% |
+| Answers citing a source that doesn't exist | 0% |
+| Says "not in the documents" when it isn't (8 unanswerable) | 100% |
+
+What this shows:
+
+- **Retrieval is the bottleneck, not generation.** Every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. When the passage was retrieved, the answer was right 53 times out of 53.
+- **No made-up answers.** All 8 unanswerable questions got "the documents don't say", and no answer cited a source that doesn't exist.
+- **The one unfaithful answer** added a side remark the sources didn't support (that the mower has no Eco mode) to an otherwise correct answer.
+- **A chunking issue showed up.** For "Will the company pay my speeding ticket?" the model noticed that a retrieved chunk ended at the heading "Using your own car", with the rules in the next chunk. Keeping headings attached to the text that follows them would fix that.
+
+Caveat: the judge is the same model that wrote the answers, so it may be lenient towards its own style. A different judge model, or spot-checking verdicts by hand with `--failures`, guards against that.
+
 ## Configuration reference
 
 All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the RRF constant, minimum similarity, query rewriting, history length, model and effort.
@@ -190,6 +218,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
 - **No auth**: this is a single-user demo. For multi-tenant use, add a `user_id` to documents and scope every query by it.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
+- **Headings in chunks**: the answer evaluation found a chunk ending at a section heading, with the section's text in the next chunk. Carrying the nearest heading into each chunk (or never ending a chunk on one) would keep sections together.
 - **Weighted fusion**: with `nomic-embed-text`, equal-weight RRF costs paraphrase accuracy (see the evaluation). Per-ranking weights in `Retriever::fuse()`, tuned with `rag:eval` on a bigger golden set, would let hybrid keep the vector ranking's paraphrase wins.
 - **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
