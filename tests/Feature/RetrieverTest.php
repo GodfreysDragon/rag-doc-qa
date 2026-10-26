@@ -114,6 +114,33 @@ class RetrieverTest extends TestCase
         $this->assertSame('Security Policy', $results[0]->documentTitle);
     }
 
+    public function test_scoped_similarity_search_looks_past_closer_chunks_in_other_documents(): void
+    {
+        $this->index('Notices', array_map(fn (int $i): string => "Refund notice {$i}: ask about your refund.", range(1, 100)));
+        $policy = $this->index('Store Policy', [self::POLICY[0]]);
+        $query = app(EmbeddingProvider::class)->embedQuery('refund notice');
+
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            // Make the planner walk the HNSW index, as it does on a large table. The index's
+            // first candidates are all Notices chunks, which the document filter then drops.
+            DB::statement('SET LOCAL enable_seqscan = off');
+            DB::statement('SET LOCAL enable_sort = off');
+            DB::enableQueryLog();
+        }
+
+        $results = app(VectorStore::class)->similaritySearch($query, limit: 3, documentIds: [$policy->id]);
+
+        $this->assertCount(1, $results);
+        $this->assertSame($policy->id, $results[0]->documentId);
+
+        if (DB::connection()->getDriverName() === 'pgsql') {
+            ['query' => $sql, 'bindings' => $bindings] = DB::getQueryLog()[0];
+            $plan = collect(DB::select("EXPLAIN {$sql}", $bindings))->pluck('QUERY PLAN')->implode("\n");
+
+            $this->assertStringContainsString('chunks_embedding_hnsw_idx', $plan);
+        }
+    }
+
     public function test_hybrid_retrieval_merges_both_rankings(): void
     {
         $this->index('Store Policy', self::POLICY);

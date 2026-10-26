@@ -270,7 +270,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Token budget reservations are conservative**: the worst case is mostly the answer limit (`ANTHROPIC_MAX_TOKENS`, 16,000), so the last ~20k tokens of a day's budget can't be used, and a client that disconnects mid-answer keeps its whole reservation. Prompt sizes are estimated at ~4 characters per token, so text that tokenises more densely can make the estimate low.
 - **Re-ranking adds latency and cost**: about 1.5 seconds and ~6.5k Haiku tokens per question. The Voyage cross-encoder option is faster, but it's only covered by tests with a faked API here, not measured.
 - **Golden set size**: 110 questions over 27 chunks separate the retrieval modes and check the fusion weight on held-out questions, but they're still too few to tune `top_k` or chunk size with confidence.
-- **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
+- **Filtered HNSW needs pgvector ≥ 0.8**: every search is scoped to the user's documents, and an HNSW scan filters its first 40 candidates after the fact, so a user with a few documents in a large table could get no results. The connection turns on iterative scans (`hnsw.iterative_scan = strict_order`, `DB_HNSW_ITERATIVE_SCAN`), which keep walking the index until enough rows match; the bundled `pgvector/pgvector:pg17` image supports them. Older pgvector versions don't have the setting, so they keep the problem.
 
 ## License
 
