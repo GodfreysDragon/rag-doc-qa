@@ -100,6 +100,8 @@ class AppServiceProvider extends ServiceProvider
             llm: $app->make(ChatModel::class),
             rewriteQueries: config('rag.retrieval.rewrite_queries'),
             historyTurns: config('rag.retrieval.history_turns'),
+            maxSourceChars: config('rag.retrieval.top_k') * config('rag.chunking.size'),
+            maxAnswerTokens: config('rag.llm.max_tokens'),
         ));
 
         $this->app->bind(AnswerEvaluator::class, fn (Application $app): AnswerEvaluator => new AnswerEvaluator(
