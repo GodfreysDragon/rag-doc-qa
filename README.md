@@ -43,7 +43,7 @@ QUERY TIME (SSE stream)
 | **Hybrid search** | Dense + full-text, merged by weighted score fusion: each list's scores scaled to 0–1, then 0.6 × vector + 0.4 × keyword. RRF (k=60) is still available with `RAG_FUSION=rrf` | Embeddings blur exact tokens (SKUs, names, acronyms) and keyword search catches them. Scaling each list to 0–1 means cosine scores and `ts_rank` never need calibrating against each other. Unlike RRF, a chunk that's the clear best on one side keeps its lead (see the evaluation). |
 | **Re-ranking** | A small Claude model (`claude-haiku-5-5`) gets the question and the 20 best fused passages in one call and returns their ids in order of relevance; the top 6 go to the prompt. `RAG_RERANKER=voyage` uses Voyage's `rerank-2.5` cross-encoder instead, and `none` turns it off | First-stage retrieval scores the question and each passage separately (one vector each, or word overlap), so it can't tell "states the answer" from "uses the same words". A model that reads them together can. On the golden sets it lifts Hit@1 to 98–100% (see the evaluation). If the call fails, the fused order is used. |
 | **Query rewriting** | Only when there's history | "What about the second one?" embeds badly on its own, so it's rewritten into a standalone query first. The first turn skips that LLM call. |
-| **Grounding** | Sources in tagged blocks with ids; the system prompt requires `[n]` citations, a plain "not in the documents" when the sources don't cover it, and treats source text as data | Cuts down on hallucination and prompt injection from uploaded files, and makes every claim checkable in the UI. |
+| **Grounding** | Sources in tagged blocks with ids; the system prompt requires `[n]` citations, a plain "not in the documents" when the sources don't cover it, answers that stick to what was asked with no claim a source doesn't state, and treats source text as data | Cuts down on hallucination and prompt injection from uploaded files, and makes every claim checkable in the UI. |
 | **Citation highlighting** | Clicking `[n]` matches the claim before it against the sentences of source `n` (shared terms, numbers weighted double) and highlights the best match | A citation points at a whole ~300-token chunk; this narrows it to the sentence a reader actually needs to check. Done client-side, so it costs no extra LLM call. |
 | **No-context short-circuit** | If nothing is retrieved, a fixed reply is returned without calling the LLM | Saves cost and avoids answers made up from general knowledge. |
 | **History** | Only conversation text is sent back, never old sources; it's normalised to alternating turns | Each turn retrieves fresh sources, and the request is always valid for the Messages API. |
@@ -238,22 +238,24 @@ Retrieval metrics don't say whether the final answers are right. `php artisan ra
 
 The judge runs on a different model from the one that writes the answers (`RAG_JUDGE_MODEL`, default `claude-sonnet-5-5`, or `--judge=` per run), so it isn't grading its own style.
 
-The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text`, answers from `claude-opus-5-5`, on the tuning set and the original seven-document corpus (64 questions, about 150k input tokens):
+Each golden set also has questions the documents don't answer: 8 in the tuning set ("Who is the CEO?") and 6 in the held-out set. For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question plus the re-ranking, so it isn't in CI; one set costs about 550k input tokens, two-thirds of them Haiku re-ranking. Results with `nomic-embed-text`, answers from `claude-opus-5-5`:
 
-| Metric | First run (RRF, Opus judging itself) | Now (sections kept whole, weighted fusion, Sonnet judge) |
-|---|---|---|
-| Correct (56 answerable) | 95% (53) | **100% (56)** |
-| Faithful to the sources (all 64) | 98% (1 unfaithful) | 95% (3 unfaithful) |
-| Cites the expected passage | 95% | **100%** |
-| Expected passage retrieved | 95% | **100%** |
-| Answers citing a source that doesn't exist | 0% | 0% |
-| Says "not in the documents" when it isn't (8 unanswerable) | 100% | 100% |
+| Metric | Tuning: first run (7 documents, RRF, Opus judging itself) | Tuning: re-ranked, earlier prompt | Tuning: re-ranked, "answer only what was asked" (default) | Held-out: earlier prompt | Held-out: default |
+|---|---|---|---|---|---|
+| Correct (56 / 54 answerable) | 95% (53) | 100% | 100% | 100% | 100% |
+| Faithful to the sources (64 / 60) | 98% (1 unfaithful) | 95% (3 unfaithful) | **98% (1)** | 100% | 100% |
+| Cites the expected passage | 95% | 100% | 100% | 100% | 100% |
+| Expected passage retrieved | 95% | 100% | 100% | 100% | 100% |
+| Answers citing a source that doesn't exist | 0% | 0% | 0% | 0% | 0% |
+| Says "not in the documents" when it isn't (8 / 6) | 100% | 100% | 100% | 100% | 100% |
+| Average answer length | | 75 words | **50 words** | 76 words | **50 words** |
 
 What this shows:
 
-- **Retrieval was the bottleneck, not generation.** In the first run every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. The run also found a chunk that ended at the heading "Using your own car", with the rules in the next chunk. After the chunking and fusion fixes the expected passage is retrieved for all 56 questions, and all 56 answers are correct.
-- **No made-up answers.** All 8 unanswerable questions got "the documents don't say", and no answer cited a source that doesn't exist.
-- **A separate judge is stricter.** Sonnet flagged three answers where Opus, judging its own answers, had flagged one. I checked all three by hand and agree. Each gets the main fact right, then adds an unsupported side remark about the other product or a nearby section, such as "the mower has no Eco mode". The pattern is over-answering, which a "stick to what was asked" rule in the system prompt could address.
+- **Retrieval was the bottleneck, not generation.** In the first run every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. The run also found a chunk that ended at the heading "Using your own car", with the rules in the next chunk. After the chunking, fusion and re-ranking changes, the expected passage is retrieved for every question in both sets and every answer is correct.
+- **The remaining failure mode was over-answering, and a prompt rule fixed most of it.** The Sonnet judge kept flagging the same pattern: the main fact right, then an unsupported side remark ("the M1 mower is not designed for this either", the People team handling "benefits-related topics"). The system prompt now says to answer only what was asked, to leave out other products and neighbouring sections, and never to conclude that something is missing or not allowed just because a source doesn't mention it. Unfaithful answers on the tuning set went from 3 to 1, answers got a third shorter, and the held-out set stayed at 100% correct and faithful, so the shorter answers didn't lose anything. The one left adds a small inference ("the map needs to exist before you can draw zones").
+- **No made-up answers.** Every unanswerable question got "the documents don't say", and no answer cited a source that doesn't exist.
+- **A separate judge is stricter.** On the first run Sonnet flagged three answers where Opus, judging its own answers, had flagged one. I check every flagged verdict by hand, and so far I've agreed with each of them.
 
 Spot-check the judge with `--failures`, which lists every answer marked incorrect or unfaithful with the judge's reason.
 
