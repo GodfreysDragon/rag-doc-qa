@@ -68,6 +68,13 @@ return [
     | On the golden set, weighted fusion with 0.6 beat RRF with both the hash
     | and nomic-embed-text embeddings (see the README).
     |
+    | reranker: "claude" (listwise ranking by a small Claude model; its tokens
+    |           count against the usage limits), "voyage" (a cross-encoder,
+    |           needs VOYAGE_API_KEY) or "none". It re-orders the best
+    |           rerank.candidates fused results and keeps top_k. On the golden
+    |           sets, Claude re-ranking lifted Hit@1 from 64–81% to 98–100%,
+    |           for ~6.5k Haiku input tokens and ~1.5 s per question.
+    |
     */
 
     'retrieval' => [
@@ -77,6 +84,13 @@ return [
         'fusion' => env('RAG_FUSION', 'weighted'),
         'vector_weight' => (float) env('RAG_VECTOR_WEIGHT', 0.6),
         'rrf_k' => 60,
+        'reranker' => env('RAG_RERANKER', 'claude'),
+        'rerank' => [
+            'candidates' => (int) env('RAG_RERANK_CANDIDATES', 20),
+            'claude_model' => env('RAG_RERANK_MODEL', 'claude-haiku-5-5'),
+            'voyage_model' => env('VOYAGE_RERANK_MODEL', 'rerank-2.5'),
+            'voyage_url' => env('VOYAGE_RERANK_URL', 'https://api.voyageai.com/v1/rerank'),
+        ],
         // Minimum cosine similarity for a vector hit to be considered at all.
         'min_score' => (float) env('RAG_MIN_SCORE', 0.0),
         // Rewrite follow-up questions into standalone queries before retrieval.

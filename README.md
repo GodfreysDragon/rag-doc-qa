@@ -7,7 +7,7 @@ Upload PDFs, Word documents, Markdown or text files and ask questions about them
 
 ![DocQA: sign in, upload a document, ask a question, get a streamed answer with citations that open the source passage](.github/demo.gif)
 
-The retrieval pipeline is built by hand rather than with a hosted "chat with your PDF" API: text extraction, chunking, embeddings, vector + keyword search, rank fusion and prompt grounding are all in this repo.
+The retrieval pipeline is built by hand rather than with a hosted "chat with your PDF" API: text extraction, chunking, embeddings, vector + keyword search, score fusion, re-ranking and prompt grounding are all in this repo.
 
 **Stack:** Laravel 13 · PHP 8.4 · Vue 3 · Tailwind 4 · PostgreSQL + pgvector (MySQL / SQLite fallback) · Claude (Anthropic PHP SDK) · Voyage AI or Ollama embeddings
 
@@ -25,7 +25,8 @@ QUERY TIME (SSE stream)
   question ─► rewrite follow-ups into a standalone query (LLM, low effort)
            ─► embed query (input_type=query)
            ─► vector search (cosine, top 20) ─┐
-           ─► keyword search (ts_rank, top 20)┴► weighted score fusion ─► top 6
+           ─► keyword search (ts_rank, top 20)┴► weighted score fusion ─► top 20
+           ─► re-rank (Claude Haiku reads the question and all 20) ─► top 6
            ─► grounded prompt with numbered <source> blocks
            ─► Claude streams an answer citing [n] ─► Vue renders clickable citations
 ```
@@ -40,6 +41,7 @@ QUERY TIME (SSE stream)
 | **Normalisation** | Every vector is L2-normalised before storage | Cosine similarity becomes a dot product, which the PHP fallback relies on. |
 | **Vector index** | pgvector HNSW with `vector_cosine_ops` | Approximate nearest-neighbour search in SQL, so queries don't scan the whole table. |
 | **Hybrid search** | Dense + full-text, merged by weighted score fusion: each list's scores scaled to 0–1, then 0.6 × vector + 0.4 × keyword. RRF (k=60) is still available with `RAG_FUSION=rrf` | Embeddings blur exact tokens (SKUs, names, acronyms) and keyword search catches them. Scaling each list to 0–1 means cosine scores and `ts_rank` never need calibrating against each other. Unlike RRF, a chunk that's the clear best on one side keeps its lead (see the evaluation). |
+| **Re-ranking** | A small Claude model (`claude-haiku-5-5`) gets the question and the 20 best fused passages in one call and returns their ids in order of relevance; the top 6 go to the prompt. `RAG_RERANKER=voyage` uses Voyage's `rerank-2.5` cross-encoder instead, and `none` turns it off | First-stage retrieval scores the question and each passage separately (one vector each, or word overlap), so it can't tell "states the answer" from "uses the same words". A model that reads them together can. On the golden sets it lifts Hit@1 to 98–100% (see the evaluation). If the call fails, the fused order is used. |
 | **Query rewriting** | Only when there's history | "What about the second one?" embeds badly on its own, so it's rewritten into a standalone query first. The first turn skips that LLM call. |
 | **Grounding** | Sources in tagged blocks with ids; the system prompt requires `[n]` citations, a plain "not in the documents" when the sources don't cover it, and treats source text as data | Cuts down on hallucination and prompt injection from uploaded files, and makes every claim checkable in the UI. |
 | **Citation highlighting** | Clicking `[n]` matches the claim before it against the sentences of source `n` (shared terms, numbers weighted double) and highlights the best match | A citation points at a whole ~300-token chunk; this narrows it to the sentence a reader actually needs to check. Done client-side, so it costs no extra LLM call. |
@@ -48,7 +50,7 @@ QUERY TIME (SSE stream)
 | **Ingestion** | Queued, unique, idempotent job (chunks replaced in one transaction); bad files fail permanently instead of retrying | Uploads return instantly, and retries never leave duplicate chunks behind. |
 | **Dedup** | SHA-256 of the upload, per user | Uploading the same file twice returns the existing document. |
 | **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents. Email verification (enforced with `DOCQA_VERIFY_EMAIL=true`), password reset by emailed link, and account deletion that removes every document, chunk and file | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. The reset form gives the same reply whether or not an account exists, and deleting an account needs the current password. |
-| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Each question reserves an upper estimate of its cost (the longest prompt it can produce, the longest answer allowed, and the query rewrite) with an atomic increment, so questions sent at the same moment can't overshoot together. The reservation is replaced by the usage the model reports, including the rewrite call. |
+| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Each question reserves an upper estimate of its cost (the longest prompt it can produce, the longest answer allowed, the query rewrite and the re-ranking call) with an atomic increment, so questions sent at the same moment can't overshoot together. The reservation is replaced by the usage the model reports, including the rewrite and re-ranking calls. |
 | **LLM safety** | `fallbacks: "default"` server-side fallback, handling of `refusal` stop reasons, and a `reset` event if a fallback takes over mid-stream | A classifier decline is retried on another model rather than shown to the user as an empty answer. |
 
 ### Swappable components
@@ -58,6 +60,7 @@ Everything sits behind small interfaces in [`app/Services/Rag`](app/Services/Rag
 - `EmbeddingProvider`: `VoyageEmbeddingProvider`, `OllamaEmbeddingProvider`, and `HashEmbeddingProvider`, an offline feature-hashing baseline. It's lexical only, so it makes a good control to compare real embeddings against, and it lets the app and tests run without keys.
 - `VectorStore`: `PgvectorStore`, which does everything in SQL, and `DatabaseVectorStore`, which stores JSON embeddings and does an exact brute-force cosine scan in PHP on MySQL/SQLite.
 - `ChatModel`: `ClaudeChatModel`, plus a `FakeChatModel` used in tests.
+- `Reranker`: `ClaudeReranker` (listwise, through `ChatModel`) and `VoyageReranker`.
 
 ---
 
@@ -164,8 +167,9 @@ php artisan rag:reindex --queue    # dispatch to the queue instead of running in
 php artisan rag:eval               # retrieval quality on the tuning set (see below)
 php artisan rag:eval --set=resources/eval/holdout.json   # …and on the held-out set
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
+php artisan rag:eval --rerank=claude   # …and add re-ranking to the comparison (one Haiku call per question)
 php artisan rag:eval-answers       # answer quality with the real LLM and an separate LLM judge (costs tokens)
-php artisan test                   # 91 tests, no network calls
+php artisan test                   # 101 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -203,6 +207,26 @@ What this shows:
 - **Why RRF stopped being the default.** RRF adds 1 / (60 + rank) for each list a chunk is in, so a chunk that's mediocre in both lists beats one that's 1st in one list and absent from the other. On the original seven documents, `nomic` ranked the speeding-ticket passage 1st, it had no keyword match, and RRF dropped it to 9th. Weighted fusion scales each list to 0–1 and adds 0.6 × vector + 0.4 × keyword, so a clear winner on one side keeps its lead.
 - **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Indexing content with hyphens replaced by spaces fixed exact-code searches on Postgres.
 
+### Re-ranking
+
+`php artisan rag:eval --rerank=claude` adds a fifth mode: weighted fusion, then the Claude re-ranker over the top 20. With `nomic-embed-text` (Hit@1 / MRR, k=6):
+
+| Mode | Tuning set (56) | Held-out set (54) |
+|---|---|---|
+| Hybrid, weighted | 64% / 0.786 | 81% / 0.883 |
+| Hybrid, weighted, then re-ranked (default) | **100% / 1.000** | **98% / 0.991** |
+
+| Hit@1 by question type | Tuning: weighted | re-ranked | Held-out: weighted | re-ranked |
+|---|---|---|---|---|
+| Exact identifiers | 76% | **100%** | 100% | 100% |
+| Shared keywords | 94% | **100%** | 95% | **100%** |
+| Paraphrases | 29% | **100%** | 61% | **96%** |
+
+- **Paraphrases were the weak spot, and re-ranking fixes them.** First-stage retrieval usually had the right passage somewhere in the top 20 but not first; a model reading the question next to each passage picks it out. The two tuning questions weighted fusion missed from the top 6 ("money for setting up a desk at my house", "mop up spilled water") both went to 1st.
+- **The held-out set confirms it.** 53 of 54 at rank 1. The one change for the worse moved "Who can I ask the silly questions when I start?" from 1st to 2nd.
+- **The cost:** about 6,500 Haiku input and 70 output tokens per question, and roughly 1.5 seconds before the answer starts streaming. Those tokens count against the usage limits like the rest of the question.
+- **Caveat:** the re-ranker is a general model, not tuned on these sets, but 110 questions over 27 chunks is still a small corpus; with thousands of chunks the gain would depend more on first-stage recall in the top 20.
+
 The corpus also doubles as sample documents to upload and try the app with.
 
 ## Answer evaluation
@@ -235,14 +259,14 @@ Spot-check the judge with `--failures`, which lists every answer marked incorrec
 
 ## Configuration reference
 
-All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the fusion method and vector weight, the RRF constant, minimum similarity, query rewriting, history length, model and effort, and the judge model for `rag:eval-answers`.
+All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the fusion method and vector weight, the RRF constant, the re-ranker and its candidate count, minimum similarity, query rewriting, history length, model and effort, and the judge model for `rag:eval-answers`.
 
 ## Limitations / next steps
 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
 - **No roles or sharing**: every account sees only its own documents; there are no admins, teams or shared collections. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
 - **Token budget reservations are conservative**: the worst case is mostly the answer limit (`ANTHROPIC_MAX_TOKENS`, 16,000), so the last ~20k tokens of a day's budget can't be used, and a client that disconnects mid-answer keeps its whole reservation. Prompt sizes are estimated at ~4 characters per token, so text that tokenises more densely can make the estimate low.
-- **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
+- **Re-ranking adds latency and cost**: about 1.5 seconds and ~6.5k Haiku tokens per question. The Voyage cross-encoder option is faster, but it's only covered by tests with a faked API here, not measured.
 - **Golden set size**: 110 questions over 27 chunks separate the retrieval modes and check the fusion weight on held-out questions, but they're still too few to tune `top_k` or chunk size with confidence.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 
