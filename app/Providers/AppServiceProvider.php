@@ -83,6 +83,8 @@ class AppServiceProvider extends ServiceProvider
             hybrid: config('rag.retrieval.hybrid'),
             rrfK: config('rag.retrieval.rrf_k'),
             minScore: config('rag.retrieval.min_score'),
+            fusion: config('rag.retrieval.fusion'),
+            vectorWeight: config('rag.retrieval.vector_weight'),
         ));
 
         $this->app->bind(TokenBudget::class, fn (Application $app): TokenBudget => new TokenBudget(
