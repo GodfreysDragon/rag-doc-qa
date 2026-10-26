@@ -47,7 +47,7 @@ QUERY TIME (SSE stream)
 | **History** | Only conversation text is sent back, never old sources; it's normalised to alternating turns | Each turn retrieves fresh sources, and the request is always valid for the Messages API. |
 | **Ingestion** | Queued, unique, idempotent job (chunks replaced in one transaction); bad files fail permanently instead of retrying | Uploads return instantly, and retries never leave duplicate chunks behind. |
 | **Dedup** | SHA-256 of the upload, per user | Uploading the same file twice returns the existing document. |
-| **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. |
+| **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents. Email verification (enforced with `DOCQA_VERIFY_EMAIL=true`), password reset by emailed link, and account deletion that removes every document, chunk and file | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. The reset form gives the same reply whether or not an account exists, and deleting an account needs the current password. |
 | **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Tokens are counted from the usage the model reports when an answer finishes. |
 | **LLM safety** | `fallbacks: "default"` server-side fallback, handling of `refusal` stop reasons, and a `reset` event if a fallback takes over mid-stream | A classifier decline is retried on another model rather than shown to the user as an empty answer. |
 
@@ -116,20 +116,24 @@ composer run dev     # web server + queue worker + Vite
 
 Open http://localhost:8000 and create an account. Uploads are processed by the queue worker, so it has to be running.
 
-Limits are set in `.env` (0 means unlimited): `RAG_UPLOADS_PER_HOUR` (30), `RAG_QUESTIONS_PER_MINUTE` (30), `RAG_DAILY_TOKENS_PER_USER` (300,000) and `RAG_DAILY_TOKENS_TOTAL` (3,000,000). Set `DOCQA_REGISTRATION=false` to stop new sign-ups.
+Limits are set in `.env` (0 means unlimited): `RAG_UPLOADS_PER_HOUR` (30), `RAG_QUESTIONS_PER_MINUTE` (30), `RAG_DAILY_TOKENS_PER_USER` (300,000) and `RAG_DAILY_TOKENS_TOTAL` (3,000,000). Set `DOCQA_REGISTRATION=false` to stop new sign-ups, and `DOCQA_VERIFY_EMAIL=true` to require a verified email address before uploading or asking. Verification and password-reset emails go through Laravel's mailer; the default `MAIL_MAILER=log` writes them to `storage/logs/laravel.log`, so set real SMTP details for a public deployment.
 
 ---
 
 ## API
 
-Every endpoint except `register` and `login` needs a signed-in session. State-changing requests send the `X-XSRF-TOKEN` header from Laravel's `XSRF-TOKEN` cookie.
+Every endpoint except `register`, `login`, `forgot-password` and `reset-password` needs a signed-in session. With `DOCQA_VERIFY_EMAIL=true`, the document and chat endpoints also need a verified email address (403 otherwise). State-changing requests send the `X-XSRF-TOKEN` header from Laravel's `XSRF-TOKEN` cookie.
 
 | Method | Endpoint | Description |
 |---|---|---|
 | `POST` | `/api/v1/register` | Create an account and sign in (`name`, `email`, `password`, `password_confirmation`) |
 | `POST` | `/api/v1/login` | Sign in (`email`, `password`) |
 | `POST` | `/api/v1/logout` | Sign out |
-| `GET` | `/api/v1/user` | The signed-in user, with today's token usage and limit |
+| `POST` | `/api/v1/forgot-password` | Email a password-reset link (`email`) |
+| `POST` | `/api/v1/reset-password` | Set a new password (`token`, `email`, `password`, `password_confirmation`) |
+| `GET` | `/api/v1/user` | The signed-in user, with verification status and today's token usage and limit |
+| `DELETE` | `/api/v1/user` | Delete the account and all its documents (`password`) |
+| `POST` | `/api/v1/email/verification-notification` | Send the verification email again |
 | `GET` | `/api/v1/documents` | List your documents with status (`pending` → `processing` → `ready` / `failed`) |
 | `POST` | `/api/v1/documents` | Upload (`multipart/form-data`, field `file`, optional `title`) |
 | `GET` | `/api/v1/documents/{id}` | Show one document |
@@ -160,7 +164,7 @@ php artisan rag:reindex --queue    # dispatch to the queue instead of running in
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
 php artisan rag:eval-answers       # answer quality with the real LLM and an separate LLM judge (costs tokens)
-php artisan test                   # 74 tests, no network calls
+php artisan test                   # 84 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -229,7 +233,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 ## Limitations / next steps
 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
-- **Accounts are basic**: email and password only, with no email verification, password reset or roles. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
+- **No roles or sharing**: every account sees only its own documents; there are no admins, teams or shared collections. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
 - **Token budget granularity**: the budget is checked before an answer starts, so the last answer of the day can overshoot it. Query-rewrite calls aren't counted, because the model reports usage only for the streamed answer.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
 - **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size, and the fusion weight was picked on this same set. A larger corpus would make Hit@k meaningful.

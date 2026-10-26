@@ -8,12 +8,37 @@ const props = defineProps({
     error: { type: String, default: null },
     selectedIds: { type: Set, required: true },
     user: { type: Object, required: true },
+    deleteAccount: { type: Function, required: true },
 });
 
 const emit = defineEmits(['upload', 'dismiss-upload', 'remove', 'reprocess', 'toggle', 'clear-selection', 'sign-out']);
 
 const fileInput = ref(null);
 const dragging = ref(false);
+
+// Deleting the account asks for the password inline rather than with a browser dialog.
+const confirmingDelete = ref(false);
+const deletePassword = ref('');
+const deleteError = ref(null);
+const deleting = ref(false);
+
+async function submitDelete() {
+    deleting.value = true;
+    deleteError.value = null;
+
+    try {
+        await props.deleteAccount(deletePassword.value);
+    } catch (e) {
+        deleteError.value = e.message;
+        deleting.value = false;
+    }
+}
+
+function cancelDelete() {
+    confirmingDelete.value = false;
+    deletePassword.value = '';
+    deleteError.value = null;
+}
 
 const ACCEPT = '.pdf,.docx,.txt,.md';
 
@@ -186,9 +211,37 @@ const statusClass = {
             </div>
         </div>
 
-        <footer class="flex items-center justify-between gap-2 border-t border-line px-5 py-3 text-xs">
-            <span class="truncate text-muted" :title="props.user.email">{{ props.user.name }}</span>
-            <button type="button" class="shrink-0 text-muted hover:text-ink" @click="emit('sign-out')">Sign out</button>
+        <footer class="border-t border-line px-5 py-3 text-xs">
+            <form v-if="confirmingDelete" class="space-y-2" @submit.prevent="submitDelete">
+                <p class="text-ink">Delete your account and all {{ props.documents.length }} of your documents? This can't be undone.</p>
+                <input
+                    v-model="deletePassword"
+                    type="password"
+                    required
+                    autocomplete="current-password"
+                    placeholder="Your password"
+                    aria-label="Your password"
+                    class="block w-full rounded-lg border border-line bg-canvas px-2.5 py-1.5 outline-none focus:border-accent"
+                />
+                <p v-if="deleteError" class="text-rose-600 dark:text-rose-400" role="alert">{{ deleteError }}</p>
+                <div class="flex justify-end gap-3">
+                    <button type="button" class="text-muted hover:text-ink" @click="cancelDelete">Cancel</button>
+                    <button
+                        type="submit"
+                        class="rounded-md bg-rose-600 px-2.5 py-1 font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+                        :disabled="deleting"
+                    >
+                        {{ deleting ? 'Deleting…' : 'Delete account' }}
+                    </button>
+                </div>
+            </form>
+            <div v-else class="flex items-center justify-between gap-2">
+                <span class="truncate text-muted" :title="props.user.email">{{ props.user.name }}</span>
+                <span class="flex shrink-0 gap-3">
+                    <button type="button" class="text-muted hover:text-rose-600" @click="confirmingDelete = true">Delete account</button>
+                    <button type="button" class="text-muted hover:text-ink" @click="emit('sign-out')">Sign out</button>
+                </span>
+            </div>
         </footer>
     </div>
 </template>

@@ -132,6 +132,9 @@ return [
 
     'auth' => [
         'registration' => (bool) env('DOCQA_REGISTRATION', true),
+        // Require a verified email address before uploading or asking. New accounts
+        // always get a verification email; this decides whether it's enforced.
+        'verify_email' => (bool) env('DOCQA_VERIFY_EMAIL', false),
     ],
 
     'limits' => [
