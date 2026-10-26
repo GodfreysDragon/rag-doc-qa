@@ -3,6 +3,7 @@
 namespace Tests\Fakes;
 
 use App\Services\Rag\Llm\ChatModel;
+use App\Services\Rag\Llm\Completion;
 use Generator;
 
 /**
@@ -48,10 +49,13 @@ class FakeChatModel implements ChatModel
         return $this;
     }
 
-    public function complete(string $system, array $messages, int $maxTokens = 2000): string
+    /**
+     * Replies with the canned rewrite text, reporting 50 input + 5 output tokens.
+     */
+    public function complete(string $system, array $messages, int $maxTokens = 2000): Completion
     {
         $this->completeCalls[] = ['system' => $system, 'messages' => $messages];
 
-        return $this->rewrite;
+        return new Completion($this->rewrite, inputTokens: 50, outputTokens: 5);
     }
 }

@@ -30,6 +30,8 @@ class DocumentChat
         You turn a follow-up question from a conversation into a standalone search query for a document search engine. Resolve pronouns and references ("it", "that section", "the second one") using the conversation so the query makes sense on its own, and keep the key terms the user used. Reply with only the query, no preamble or quotes.
         PROMPT;
 
+    private const REWRITE_MAX_TOKENS = 2000;
+
     public const NO_CONTEXT_ANSWER = "I couldn't find anything in your documents that relates to that question. Try rephrasing it, or check that the relevant document has finished processing.";
 
     public function __construct(
@@ -37,7 +39,35 @@ class DocumentChat
         private readonly ChatModel $llm,
         private readonly bool $rewriteQueries = true,
         private readonly int $historyTurns = 6,
+        private readonly int $maxSourceChars = 6 * 1200,
+        private readonly int $maxAnswerTokens = 16000,
     ) {}
+
+    /**
+     * An upper estimate of the tokens answering will use, for reserving
+     * budget before the answer starts: the longest prompt this question can
+     * produce (system prompt, history, every retrieved source at full chunk
+     * size) at ~4 characters per token, the longest answer allowed, and the
+     * query rewrite when there is history.
+     *
+     * @param  list<array{role: string, content: string}>  $history
+     */
+    public function tokenCeiling(string $question, array $history = []): int
+    {
+        $history = $this->normalizeHistory($history);
+        $historyChars = array_sum(array_map(fn (array $turn): int => mb_strlen($turn['content']), $history));
+
+        // Source tags, ids and titles add a little on top of the chunk text.
+        $promptChars = mb_strlen(self::SYSTEM_PROMPT) + $historyChars + mb_strlen($question) + (int) ($this->maxSourceChars * 1.2);
+        $ceiling = (int) ceil($promptChars / 4) + $this->maxAnswerTokens;
+
+        if ($this->rewriteQueries && $history !== []) {
+            $rewriteChars = mb_strlen(self::REWRITE_PROMPT) + count($history) * 1500 + mb_strlen($question);
+            $ceiling += (int) ceil($rewriteChars / 4) + self::REWRITE_MAX_TOKENS;
+        }
+
+        return $ceiling;
+    }
 
     /**
      * @param  list<array{role: string, content: string}>  $history  Previous turns, oldest first.
@@ -48,7 +78,7 @@ class DocumentChat
     {
         $history = $this->normalizeHistory($history);
 
-        $searchQuery = $this->standaloneQuery($question, $history);
+        [$searchQuery, $rewriteUsage] = $this->standaloneQuery($question, $history);
         yield ['type' => 'query', 'query' => $searchQuery];
 
         $sources = $this->retriever->retrieve($searchQuery, $documentIds);
@@ -60,7 +90,7 @@ class DocumentChat
 
         if ($sources === []) {
             yield ['type' => 'text', 'text' => self::NO_CONTEXT_ANSWER];
-            yield ['type' => 'done', 'stop_reason' => 'no_context', 'model' => null, 'usage' => null];
+            yield ['type' => 'done', 'stop_reason' => 'no_context', 'model' => null, 'usage' => $rewriteUsage];
 
             return;
         }
@@ -70,7 +100,16 @@ class DocumentChat
             ['role' => 'user', 'content' => $this->buildPrompt($question, $sources)],
         ];
 
-        yield from $this->llm->stream(self::SYSTEM_PROMPT, $messages);
+        // The done event's usage covers the whole question: the rewrite and the answer.
+        foreach ($this->llm->stream(self::SYSTEM_PROMPT, $messages) as $event) {
+            if ($event['type'] === 'done' && $rewriteUsage !== null) {
+                foreach ($rewriteUsage as $kind => $tokens) {
+                    $event['usage'][$kind] = ($event['usage'][$kind] ?? 0) + $tokens;
+                }
+            }
+
+            yield $event;
+        }
     }
 
     /**
@@ -100,11 +139,12 @@ class DocumentChat
      * turn, and falls back to the raw question if the rewrite fails.
      *
      * @param  list<array{role: 'user'|'assistant', content: string}>  $history
+     * @return array{0: string, 1: array{input_tokens: int, output_tokens: int}|null} The query, and the rewrite's token usage.
      */
-    private function standaloneQuery(string $question, array $history): string
+    private function standaloneQuery(string $question, array $history): array
     {
         if (! $this->rewriteQueries || $history === []) {
-            return $question;
+            return [$question, null];
         }
 
         $transcript = collect($history)
@@ -112,19 +152,19 @@ class DocumentChat
             ->implode("\n\n");
 
         try {
-            $rewritten = $this->llm->complete(self::REWRITE_PROMPT, [[
+            $completion = $this->llm->complete(self::REWRITE_PROMPT, [[
                 'role' => 'user',
                 'content' => "<conversation>\n{$transcript}\n</conversation>\n\nFollow-up question: {$question}",
-            ]]);
+            ]], maxTokens: self::REWRITE_MAX_TOKENS);
         } catch (Throwable $exception) {
             Log::warning('Query rewrite failed; using the original question.', ['exception' => $exception->getMessage()]);
 
-            return $question;
+            return [$question, null];
         }
 
-        $rewritten = trim($rewritten, " \n\t\"'");
+        $rewritten = trim($completion->text, " \n\t\"'");
 
-        return $rewritten !== '' && mb_strlen($rewritten) < 500 ? $rewritten : $question;
+        return [$rewritten !== '' && mb_strlen($rewritten) < 500 ? $rewritten : $question, $completion->usage()];
     }
 
     /**

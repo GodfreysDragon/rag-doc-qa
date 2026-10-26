@@ -48,7 +48,7 @@ QUERY TIME (SSE stream)
 | **Ingestion** | Queued, unique, idempotent job (chunks replaced in one transaction); bad files fail permanently instead of retrying | Uploads return instantly, and retries never leave duplicate chunks behind. |
 | **Dedup** | SHA-256 of the upload, per user | Uploading the same file twice returns the existing document. |
 | **Accounts** | Session-cookie auth with CSRF protection (the SPA is same-origin, so no API tokens); every document has an owner, and retrieval is always scoped to the signed-in user's documents. Email verification (enforced with `DOCQA_VERIFY_EMAIL=true`), password reset by emailed link, and account deletion that removes every document, chunk and file | One user can never retrieve or cite another user's text. Other users' document ids answer 404, so they don't reveal that a document exists. The reset form gives the same reply whether or not an account exists, and deleting an account needs the current password. |
-| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Tokens are counted from the usage the model reports when an answer finishes. |
+| **Usage limits** | Per-user rate limits on uploads and questions, plus a daily LLM token budget per user and for the whole app | An open deployment can't run up an unbounded bill. Each question reserves an upper estimate of its cost (the longest prompt it can produce, the longest answer allowed, and the query rewrite) with an atomic increment, so questions sent at the same moment can't overshoot together. The reservation is replaced by the usage the model reports, including the rewrite call. |
 | **LLM safety** | `fallbacks: "default"` server-side fallback, handling of `refusal` stop reasons, and a `reset` event if a fallback takes over mid-stream | A classifier decline is retried on another model rather than shown to the user as an empty answer. |
 
 ### Swappable components
@@ -139,7 +139,7 @@ Every endpoint except `register`, `login`, `forgot-password` and `reset-password
 | `GET` | `/api/v1/documents/{id}` | Show one document |
 | `POST` | `/api/v1/documents/{id}/reprocess` | Re-run ingestion |
 | `DELETE` | `/api/v1/documents/{id}` | Delete the document, its file and its chunks |
-| `POST` | `/api/v1/chat` | Ask a question; responds with `text/event-stream`, or 429 once the daily token budget is spent |
+| `POST` | `/api/v1/chat` | Ask a question; responds with `text/event-stream`, or 429 when the question's worst-case cost no longer fits in the daily token budget |
 
 `POST /api/v1/chat` body:
 
@@ -164,7 +164,7 @@ php artisan rag:reindex --queue    # dispatch to the queue instead of running in
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
 php artisan rag:eval-answers       # answer quality with the real LLM and an separate LLM judge (costs tokens)
-php artisan test                   # 84 tests, no network calls
+php artisan test                   # 88 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -234,7 +234,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
 - **No roles or sharing**: every account sees only its own documents; there are no admins, teams or shared collections. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
-- **Token budget granularity**: the budget is checked before an answer starts, so the last answer of the day can overshoot it. Query-rewrite calls aren't counted, because the model reports usage only for the streamed answer.
+- **Token budget reservations are conservative**: the worst case is mostly the answer limit (`ANTHROPIC_MAX_TOKENS`, 16,000), so the last ~20k tokens of a day's budget can't be used, and a client that disconnects mid-answer keeps its whole reservation. Prompt sizes are estimated at ~4 characters per token, so text that tokenises more densely can make the estimate low.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
 - **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size, and the fusion weight was picked on this same set. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
