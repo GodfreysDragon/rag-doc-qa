@@ -5,7 +5,7 @@
 
 Upload PDFs, Word documents, Markdown or text files and ask questions about them. Answers stream back with inline citations that link to the exact passages they came from.
 
-![DocQA: upload a document, ask a question, get a streamed answer with citations that open the source passage](.github/demo.gif)
+![DocQA: sign in, upload a document, ask a question, get a streamed answer with citations that open the source passage](.github/demo.gif)
 
 The retrieval pipeline is built by hand rather than with a hosted "chat with your PDF" API: text extraction, chunking, embeddings, vector + keyword search, rank fusion and prompt grounding are all in this repo.
 
