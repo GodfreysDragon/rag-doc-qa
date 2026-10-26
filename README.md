@@ -159,8 +159,8 @@ php artisan rag:reindex --stale    # only documents embedded with a different mo
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
-php artisan rag:eval-answers       # answer quality with the real LLM and an LLM judge (costs tokens)
-php artisan test                   # 72 tests, no network calls
+php artisan rag:eval-answers       # answer quality with the real LLM and an separate LLM judge (costs tokens)
+php artisan test                   # 74 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -201,29 +201,30 @@ Retrieval metrics don't say whether the final answers are right. `php artisan ra
 - **Deterministic checks:** do the `[n]` citations point at sources that exist, and does a cited source contain the expected passage?
 - **An LLM judge**, given the question, the retrieved sources, the answer and the expected phrase: is the answer **correct**, and is every claim **faithful** to the sources?
 
-The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text` and `claude-opus-5-5` (64 questions, about 150k input tokens):
+The judge runs on a different model from the one that writes the answers (`RAG_JUDGE_MODEL`, default `claude-sonnet-5-5`, or `--judge=` per run), so it isn't grading its own style.
 
-| Metric | Result |
-|---|---|
-| Correct (56 answerable) | 95% (53) |
-| Faithful to the sources (all 64) | 98% |
-| Cites the expected passage | 95% |
-| Expected passage retrieved | 95% |
-| Answers citing a source that doesn't exist | 0% |
-| Says "not in the documents" when it isn't (8 unanswerable) | 100% |
+The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text`, answers from `claude-opus-5-5` (64 questions, about 150k input tokens):
+
+| Metric | First run (RRF, Opus judging itself) | Now (sections kept whole, weighted fusion, Sonnet judge) |
+|---|---|---|
+| Correct (56 answerable) | 95% (53) | **100% (56)** |
+| Faithful to the sources (all 64) | 98% (1 unfaithful) | 95% (3 unfaithful) |
+| Cites the expected passage | 95% | **100%** |
+| Expected passage retrieved | 95% | **100%** |
+| Answers citing a source that doesn't exist | 0% | 0% |
+| Says "not in the documents" when it isn't (8 unanswerable) | 100% | 100% |
 
 What this shows:
 
-- **Retrieval is the bottleneck, not generation.** Every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. When the passage was retrieved, the answer was right 53 times out of 53.
+- **Retrieval was the bottleneck, not generation.** In the first run every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. The run also found a chunk that ended at the heading "Using your own car", with the rules in the next chunk. After the chunking and fusion fixes the expected passage is retrieved for all 56 questions, and all 56 answers are correct.
 - **No made-up answers.** All 8 unanswerable questions got "the documents don't say", and no answer cited a source that doesn't exist.
-- **The one unfaithful answer** added a side remark the sources didn't support (that the mower has no Eco mode) to an otherwise correct answer.
-- **A chunking issue showed up.** For "Will the company pay my speeding ticket?" the model noticed that a retrieved chunk ended at the heading "Using your own car", with the rules in the next chunk. The chunker now packs whole Markdown sections and never ends a chunk on a heading.
+- **A separate judge is stricter.** Sonnet flagged three answers where Opus, judging its own answers, had flagged one. I checked all three by hand and agree. Each gets the main fact right, then adds an unsupported side remark about the other product or a nearby section, such as "the mower has no Eco mode". The pattern is over-answering, which a "stick to what was asked" rule in the system prompt could address.
 
-Caveat: the judge is the same model that wrote the answers, so it may be lenient towards its own style. A different judge model, or spot-checking verdicts by hand with `--failures`, guards against that.
+Spot-check the judge with `--failures`, which lists every answer marked incorrect or unfaithful with the judge's reason.
 
 ## Configuration reference
 
-All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the fusion method and vector weight, the RRF constant, minimum similarity, query rewriting, history length, model and effort.
+All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the fusion method and vector weight, the RRF constant, minimum similarity, query rewriting, history length, model and effort, and the judge model for `rag:eval-answers`.
 
 ## Limitations / next steps
 
