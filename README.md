@@ -149,7 +149,7 @@ php artisan rag:reindex --stale    # only documents embedded with a different mo
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
-php artisan test                   # 45 tests, no network calls
+php artisan test                   # 46 tests, no network calls
 ```
 
 ## Retrieval evaluation

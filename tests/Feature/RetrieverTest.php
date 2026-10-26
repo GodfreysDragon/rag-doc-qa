@@ -103,6 +103,16 @@ class RetrieverTest extends TestCase
         $this->assertStringContainsString('E-417', $results[0]->content);
     }
 
+    public function test_keyword_search_scores_every_match_however_many_there_are(): void
+    {
+        $this->index('Notices', array_map(fn (int $i): string => "Notice {$i}: wear your badge.", range(1, 600)));
+        $this->index('Security Policy', ['Security badge rules: a lost security badge must be reported the same day.']);
+
+        $results = app(VectorStore::class)->keywordSearch('lost security badge', limit: 5);
+
+        $this->assertSame('Security Policy', $results[0]->documentTitle);
+    }
+
     public function test_hybrid_retrieval_merges_both_rankings(): void
     {
         $this->index('Store Policy', self::POLICY);

@@ -16,13 +16,11 @@ use Illuminate\Database\Query\Builder;
  *
  * Exact search is O(n) per query — perfectly fine for a few thousand chunks,
  * and a good illustration of what an ANN index like pgvector's HNSW saves you
- * once the corpus grows.
+ * once the corpus grows. Keyword search likewise scores every LIKE match.
  */
 class DatabaseVectorStore implements VectorStore
 {
     private const SCAN_BATCH = 500;
-
-    private const KEYWORD_CANDIDATES = 500;
 
     public function __construct(private readonly ConnectionInterface $db) {}
 
@@ -85,39 +83,40 @@ class DatabaseVectorStore implements VectorStore
             return [];
         }
 
-        $candidates = $this->readyChunks($documentIds)
+        /** @var array<string, int> $documentFrequency */
+        $documentFrequency = [];
+        /** @var array<int, array<string, int>> $termFrequencies */
+        $termFrequencies = [];
+        $total = 0;
+
+        // Every LIKE match is scored, in batches: capping the candidate set would
+        // drop arbitrary matches, since there is no relevance order to cap by.
+        $this->readyChunks($documentIds)
             ->select(['chunks.id', 'chunks.content'])
             ->where(function (Builder $where) use ($terms): void {
                 foreach ($terms as $term) {
                     $where->orWhere('chunks.content', 'like', '%'.addcslashes($term, '%_\\').'%');
                 }
             })
-            ->limit(self::KEYWORD_CANDIDATES)
-            ->get();
+            ->chunkById(self::SCAN_BATCH, function ($candidates) use ($terms, &$documentFrequency, &$termFrequencies, &$total): void {
+                foreach ($candidates as $candidate) {
+                    $total++;
+                    $words = array_count_values(Keywords::tokens($candidate->content));
 
-        if ($candidates->isEmpty()) {
+                    foreach ($terms as $term) {
+                        $count = $words[$term] ?? 0;
+
+                        if ($count > 0) {
+                            $termFrequencies[(int) $candidate->id][$term] = $count;
+                            $documentFrequency[$term] = ($documentFrequency[$term] ?? 0) + 1;
+                        }
+                    }
+                }
+            }, 'chunks.id', 'id');
+
+        if ($termFrequencies === []) {
             return [];
         }
-
-        /** @var array<string, int> $documentFrequency */
-        $documentFrequency = [];
-        /** @var array<int, array<string, int>> $termFrequencies */
-        $termFrequencies = [];
-
-        foreach ($candidates as $candidate) {
-            $words = array_count_values(Keywords::tokens($candidate->content));
-
-            foreach ($terms as $term) {
-                $count = $words[$term] ?? 0;
-
-                if ($count > 0) {
-                    $termFrequencies[(int) $candidate->id][$term] = $count;
-                    $documentFrequency[$term] = ($documentFrequency[$term] ?? 0) + 1;
-                }
-            }
-        }
-
-        $total = $candidates->count();
         $scores = [];
 
         foreach ($termFrequencies as $chunkId => $frequencies) {
