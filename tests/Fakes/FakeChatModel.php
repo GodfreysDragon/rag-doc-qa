@@ -17,6 +17,9 @@ class FakeChatModel implements ChatModel
     /** @var list<array{system: string, messages: list<array{role: string, content: string}>}> */
     public array $completeCalls = [];
 
+    /** @var list<string> Models requested through withModel(); the fake answers for all of them. */
+    public array $models = [];
+
     public function __construct(
         public string $answer = 'The refund window is 30 days [1].',
         public string $rewrite = '',
@@ -36,6 +39,13 @@ class FakeChatModel implements ChatModel
             'model' => 'fake-model',
             'usage' => ['input_tokens' => 100, 'output_tokens' => 10],
         ];
+    }
+
+    public function withModel(string $model): ChatModel
+    {
+        $this->models[] = $model;
+
+        return $this;
     }
 
     public function complete(string $system, array $messages, int $maxTokens = 2000): string

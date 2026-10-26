@@ -99,6 +99,21 @@ return [
         'max_tokens' => (int) env('ANTHROPIC_MAX_TOKENS', 16000),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Evaluation
+    |--------------------------------------------------------------------------
+    |
+    | rag:eval-answers grades every answer with an LLM judge. A different model
+    | from the one that wrote the answers is less likely to favour its own
+    | style. Leave it empty to judge with rag.llm.model.
+    |
+    */
+
+    'evaluation' => [
+        'judge_model' => env('RAG_JUDGE_MODEL', 'claude-sonnet-5-5'),
+    ],
+
     'uploads' => [
         'max_kb' => (int) env('RAG_MAX_UPLOAD_KB', 20480),
         'extensions' => ['pdf', 'docx', 'txt', 'md'],

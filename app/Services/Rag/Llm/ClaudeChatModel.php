@@ -75,6 +75,11 @@ class ClaudeChatModel implements ChatModel
         ];
     }
 
+    public function withModel(string $model): ChatModel
+    {
+        return new self($this->client, $model, $this->effort, $this->maxTokens);
+    }
+
     public function complete(string $system, array $messages, int $maxTokens = 2000): string
     {
         $message = $this->client->beta->messages->create(

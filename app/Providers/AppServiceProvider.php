@@ -9,6 +9,8 @@ use App\Services\Rag\Embeddings\EmbeddingProvider;
 use App\Services\Rag\Embeddings\HashEmbeddingProvider;
 use App\Services\Rag\Embeddings\OllamaEmbeddingProvider;
 use App\Services\Rag\Embeddings\VoyageEmbeddingProvider;
+use App\Services\Rag\Evaluation\AnswerEvaluator;
+use App\Services\Rag\Evaluation\EvaluationCorpus;
 use App\Services\Rag\Llm\ChatModel;
 use App\Services\Rag\Llm\ClaudeChatModel;
 use App\Services\Rag\Retrieval\Retriever;
@@ -99,6 +101,20 @@ class AppServiceProvider extends ServiceProvider
             rewriteQueries: config('rag.retrieval.rewrite_queries'),
             historyTurns: config('rag.retrieval.history_turns'),
         ));
+
+        $this->app->bind(AnswerEvaluator::class, fn (Application $app): AnswerEvaluator => new AnswerEvaluator(
+            corpus: $app->make(EvaluationCorpus::class),
+            chat: $app->make(DocumentChat::class),
+            judge: $app->make(ChatModel::class)->withModel(self::judgeModel()),
+        ));
+    }
+
+    /**
+     * The model that grades answers in rag:eval-answers.
+     */
+    public static function judgeModel(): string
+    {
+        return config('rag.evaluation.judge_model') ?: config('rag.llm.model');
     }
 
     /**
