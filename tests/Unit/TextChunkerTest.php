@@ -99,6 +99,65 @@ class TextChunkerTest extends TestCase
         }
     }
 
+    public function test_a_chunk_never_ends_on_a_heading(): void
+    {
+        $text = "# Policy\n\n".str_repeat('Intro sentence here. ', 8)."\n\n## Using your own car\n\nFines for traffic violations are never reimbursed.";
+
+        $chunks = (new TextChunker(size: 200, overlap: 40))->splitText($text);
+
+        foreach ($chunks as $chunk) {
+            $this->assertDoesNotMatchRegularExpression('/^#+ .*\z/m', $chunk, 'A chunk ends on a heading.');
+        }
+
+        $this->assertSame("Policy\n\n## Using your own car\n\nFines for traffic violations are never reimbursed.", end($chunks));
+    }
+
+    public function test_small_sections_are_packed_together_whole(): void
+    {
+        $text = "# Policy\n\n## Hotels\n\nUp to 150 euros a night.\n\n## Meals\n\nUp to 40 euros a day.\n\n## Car\n\n".str_repeat('Mileage is paid per kilometre. ', 3);
+
+        $chunks = (new TextChunker(size: 120, overlap: 20))->splitText($text);
+
+        $this->assertSame([
+            "# Policy\n\n## Hotels\n\nUp to 150 euros a night.\n\n## Meals\n\nUp to 40 euros a day.",
+            "Policy\n\n## Car\n\n".trim(str_repeat('Mileage is paid per kilometre. ', 3)),
+        ], $chunks);
+    }
+
+    public function test_pieces_of_a_long_section_carry_its_heading_trail(): void
+    {
+        $sentences = array_map(fn (int $i): string => "Rule {$i} applies to every claim.", range(1, 20));
+        $text = "# Expenses\n\n## Claims\n\n".implode(' ', $sentences);
+
+        $chunks = (new TextChunker(size: 200, overlap: 40))->splitText($text);
+
+        $this->assertGreaterThan(2, count($chunks));
+        $this->assertStringStartsWith("# Expenses\n\n## Claims\n\nRule 1 ", $chunks[0]);
+
+        foreach (array_slice($chunks, 1) as $chunk) {
+            $this->assertStringStartsWith("Expenses › Claims\n\n", $chunk);
+            $this->assertLessThanOrEqual(200, mb_strlen($chunk));
+        }
+
+        $joined = implode(' ', $chunks);
+
+        foreach ($sentences as $sentence) {
+            $this->assertStringContainsString($sentence, $joined);
+        }
+    }
+
+    public function test_the_trail_only_holds_headings_above_the_section(): void
+    {
+        $text = "# Guide\n\n## Setup\n\n### Wi-Fi\n\nHold the button.\n\n## Errors\n\n".str_repeat('E-12 means the wheel is stuck. ', 8);
+
+        $chunks = (new TextChunker(size: 120, overlap: 20))->splitText($text);
+
+        $errors = array_values(array_filter($chunks, fn (string $chunk): bool => str_contains($chunk, '## Errors')));
+        $this->assertCount(1, $errors);
+        $this->assertStringStartsWith("Guide\n\n## Errors\n\n", $errors[0]);
+        $this->assertStringContainsString("Guide › Errors\n\n", $chunks[array_key_last($chunks)]);
+    }
+
     public function test_overlap_must_be_smaller_than_size(): void
     {
         $this->expectException(InvalidArgumentException::class);
