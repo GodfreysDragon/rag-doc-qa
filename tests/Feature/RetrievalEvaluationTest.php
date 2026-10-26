@@ -9,6 +9,7 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Artisan;
 use Illuminate\Support\Facades\Storage;
 use InvalidArgumentException;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class RetrievalEvaluationTest extends TestCase
@@ -78,6 +79,37 @@ class RetrievalEvaluationTest extends TestCase
 
         $this->assertSame(0, Document::count());
         $this->assertSame([], Storage::disk('local')->allFiles());
+    }
+
+    public static function goldenSets(): array
+    {
+        return [
+            'tuning' => ['eval/questions.json'],
+            'holdout' => ['eval/holdout.json'],
+        ];
+    }
+
+    #[DataProvider('goldenSets')]
+    public function test_every_expected_phrase_is_in_its_document(string $set): void
+    {
+        $cases = json_decode(file_get_contents(resource_path($set)), true, flags: JSON_THROW_ON_ERROR)['cases'];
+
+        foreach ($cases as $case) {
+            $path = resource_path("eval/corpus/{$case['document']}");
+
+            $this->assertFileExists($path, "Case \"{$case['question']}\" refers to a missing document.");
+            $this->assertTrue(
+                RetrievalEvaluator::containsExpected(file_get_contents($path), $case['expect']),
+                "\"{$case['expect']}\" is not in {$case['document']}.",
+            );
+        }
+    }
+
+    public function test_the_holdout_set_shares_no_questions_with_the_tuning_set(): void
+    {
+        $questions = fn (string $set): array => array_column(json_decode(file_get_contents(resource_path($set)), true)['cases'], 'question');
+
+        $this->assertSame([], array_values(array_intersect($questions('eval/questions.json'), $questions('eval/holdout.json'))));
     }
 
     public function test_results_can_be_exported_as_json(): void

@@ -161,40 +161,47 @@ The stream emits `query` (the search query actually used) → `sources` (ranked 
 php artisan rag:reindex            # re-chunk + re-embed everything
 php artisan rag:reindex --stale    # only documents embedded with a different model
 php artisan rag:reindex --queue    # dispatch to the queue instead of running inline
-php artisan rag:eval               # retrieval quality on the golden set (see below)
+php artisan rag:eval               # retrieval quality on the tuning set (see below)
+php artisan rag:eval --set=resources/eval/holdout.json   # …and on the held-out set
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
 php artisan rag:eval-answers       # answer quality with the real LLM and an separate LLM judge (costs tokens)
-php artisan test                   # 88 tests, no network calls
+php artisan test                   # 91 tests, no network calls
 ```
 
 ## Retrieval evaluation
 
-`php artisan rag:eval` measures how often retrieval finds the right passage. The golden set in [`resources/eval`](resources/eval) has seven fictional company documents (handbook, product manuals, policies, a runbook) and 56 questions. Each question names the document and a phrase the retrieved chunk must contain, so the set doesn't depend on chunk size. The documents deliberately overlap: both product manuals have an error `E-12` that means different things, and two policies have 24-hour reporting rules.
+`php artisan rag:eval` measures how often retrieval finds the right passage. The corpus in [`resources/eval/corpus`](resources/eval/corpus) has twelve fictional company documents (27 chunks): a handbook, contractor guidelines, an onboarding guide, two product manuals and an accessory manual, and policies for travel, procurement, security and data retention, plus a runbook and support SLAs. They overlap on purpose: the auto-empty dock manual shares most of its vocabulary with the vacuum manual, both robot manuals have an error `E-12` that means different things, contractors and employees have different rules for leave and expenses, and procurement and expenses both talk about approvals, receipts and Finance.
 
-The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and both hybrid fusions: Reciprocal Rank Fusion (RRF) and weighted score fusion, the default. CI runs it on both databases with the offline `hash` embeddings. Results (k=6, 17 chunks):
+There are two golden sets over that corpus. Each question names the document and a phrase the retrieved chunk must contain, so the sets don't depend on chunk size, and a test checks every phrase really is in its document.
 
-| Mode | `hash` · SQLite | `hash` · pgvector | `nomic-embed-text` (Ollama) · SQLite |
-|---|---|---|---|
-| Vector only | 61% / 0.717 | 61% / 0.717 | 66% / 0.785 |
-| Keyword only | 68% / 0.750 | 63% / 0.722 | 68% / 0.750 |
-| Hybrid, RRF | 66% / 0.760 | 68% / **0.766** | 64% / 0.775 |
-| Hybrid, weighted (default) | **70% / 0.774** | 68% / 0.763 | **71% / 0.838** |
+- **Tuning set** ([`questions.json`](resources/eval/questions.json), 56 questions): the set the fusion method and weight were chosen on.
+- **Held-out set** ([`holdout.json`](resources/eval/holdout.json), 54 questions, `--set=resources/eval/holdout.json`): written afterwards together with five of the documents, and never used for tuning. It shows whether the settings generalise.
 
-Cells are Hit@1 / MRR. The Ollama column was run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). With `nomic-embed-text`, weighted fusion finds the expected passage in the top 6 for all 56 questions (RRF: 53). Hit@1 by question type:
+The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and both hybrid fusions: Reciprocal Rank Fusion (RRF) and weighted score fusion, the default. CI runs both sets on both databases with the offline `hash` embeddings. Results (k=6, Hit@1 / MRR):
 
-| Question type | `hash` vector | `hash` RRF | `hash` weighted | `nomic` vector | `nomic` RRF | `nomic` weighted |
+| Mode | Tuning · `hash` · SQLite | Tuning · `hash` · pgvector | Tuning · `nomic` · SQLite | Held-out · `hash` · SQLite | Held-out · `hash` · pgvector | Held-out · `nomic` · SQLite |
 |---|---|---|---|---|---|---|
-| Exact identifiers (17) | 76% | 88% | **94%** | 65% | 76% | **88%** |
-| Shared keywords (18) | 94% | 94% | 94% | 83% | 83% | **94%** |
-| Paraphrases (21) | 19% | 24% | 29% | **52%** | 38% | 38% |
+| Vector only | 57% / 0.667 | 57% / 0.667 | 61% / 0.747 | 57% / 0.679 | 57% / 0.679 | 67% / 0.785 |
+| Keyword only | 66% / 0.726 | 55% / 0.658 | 66% / 0.726 | 70% / 0.807 | 65% / 0.779 | 70% / 0.807 |
+| Hybrid, RRF | 64% / 0.734 | **63% / 0.721** | 57% / 0.728 | **70% / 0.817** | **67% / 0.794** | 76% / 0.866 |
+| Hybrid, weighted (default) | **66% / 0.736** | 61% / 0.701 | **64% / 0.786** | 67% / 0.777 | 59% / 0.742 | **81% / 0.883** |
+
+`nomic` is `nomic-embed-text` via Ollama, run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). With it, weighted fusion has the expected passage in the top 6 for 54 of 56 tuning questions and all 54 held-out ones. Hit@1 by question type with `nomic`:
+
+| Question type | Tuning: vector | RRF | weighted | Held-out: vector | RRF | weighted |
+|---|---|---|---|---|---|---|
+| Exact identifiers (17 / 11) | 65% | 71% | **76%** | 73% | 91% | **100%** |
+| Shared keywords (18 / 20) | 78% | 83% | **94%** | 80% | 90% | **95%** |
+| Paraphrases (21 / 23) | **43%** | 24% | 29% | 52% | 57% | **61%** |
 
 What this shows:
 
-- **A semantic model fixes paraphrases.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed", but `nomic-embed-text` ranks that passage 1st. Vector-only Hit@1 on paraphrases rises from 19% with `hash` to 52%, and Hit@3 overall from 80% to 91%.
-- **Keyword search still wins on exact terms.** `nomic` vector search finds the passage first for only 65% of identifier questions, against 88% for keyword search. That's the case for hybrid retrieval.
-- **RRF lost the vector ranking's best hits.** RRF adds 1 / (60 + rank) for each list a chunk is in, so a chunk that's mediocre in both lists beats one that's 1st in one list and absent from the other. With `nomic`, the speeding-ticket passage was 1st for vector search, had no keyword match, and fell to 9th. Part of this is the small corpus: the 20 candidates cover all 17 chunks, so almost every chunk gets a second RRF score.
-- **Weighted score fusion keeps them.** Each list's scores are scaled to 0–1 (best = 1) and combined as 0.6 × vector + 0.4 × keyword, so a clear winner on one side keeps most of its lead. With `nomic` it lifts MRR from 0.775 to 0.838 and fixes all three RRF misses. With `hash` the two fusions are close (better on SQLite, a tie on Postgres), because `hash` vectors are themselves lexical. The weight was picked from 0.5–0.9 on this golden set, so it's tuned to it; a larger set would confirm it.
-- **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Keyword-only Hit@1 on exact questions was 65% (vs 88% for the PHP scorer). Indexing content with hyphens replaced by spaces raised it to 82%, and hybrid Hit@1 on Postgres from 64% to 68%.
+- **The weighted default generalises with a semantic model.** On the held-out set it's the best mode with `nomic` (MRR 0.883 vs 0.866 for RRF). A sweep on the held-out questions puts the best weight at 0.7 (MRR 0.892), within 0.01 of the 0.6 default, so the weight was not overfitted to the tuning set. I kept 0.6 rather than re-tune on the held-out set, which would stop it being held out.
+- **With the lexical `hash` baseline, RRF is as good or better.** `hash` vectors are themselves word overlap, so both lists agree and rewarding agreement (RRF) works; on Postgres RRF wins on both sets. The default is chosen for the real embedding models the app is meant to run with, and `RAG_FUSION=rrf` is there for lexical setups.
+- **The overlapping documents make it harder.** Adding them (17 → 27 chunks, now more than the 20 candidates per search) lowered tuning-set MRR with `nomic` from 0.838 to 0.786: "Is there money for setting up a desk at my house?" now competes with the contractor and onboarding guides.
+- **A semantic model fixes paraphrases, keyword search fixes identifiers.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed", but `nomic` finds it; vector-only paraphrase Hit@1 is 43% with `nomic` against 14% with `hash`. Keyword search still wins on exact codes (88% vs 65% for `nomic` vector search), which is the case for hybrid retrieval.
+- **Why RRF stopped being the default.** RRF adds 1 / (60 + rank) for each list a chunk is in, so a chunk that's mediocre in both lists beats one that's 1st in one list and absent from the other. On the original seven documents, `nomic` ranked the speeding-ticket passage 1st, it had no keyword match, and RRF dropped it to 9th. Weighted fusion scales each list to 0–1 and adds 0.6 × vector + 0.4 × keyword, so a clear winner on one side keeps its lead.
+- **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Indexing content with hyphens replaced by spaces fixed exact-code searches on Postgres.
 
 The corpus also doubles as sample documents to upload and try the app with.
 
@@ -207,7 +214,7 @@ Retrieval metrics don't say whether the final answers are right. `php artisan ra
 
 The judge runs on a different model from the one that writes the answers (`RAG_JUDGE_MODEL`, default `claude-sonnet-5-5`, or `--judge=` per run), so it isn't grading its own style.
 
-The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text`, answers from `claude-opus-5-5` (64 questions, about 150k input tokens):
+The golden set also has 8 questions the documents don't answer ("Who is the CEO?"). For those, the right answer is to say so, which measures how often the system makes things up. The run makes two LLM calls per question, so it isn't in CI. Results with `nomic-embed-text`, answers from `claude-opus-5-5`, on the tuning set and the original seven-document corpus (64 questions, about 150k input tokens):
 
 | Metric | First run (RRF, Opus judging itself) | Now (sections kept whole, weighted fusion, Sonnet judge) |
 |---|---|---|
@@ -236,7 +243,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **No roles or sharing**: every account sees only its own documents; there are no admins, teams or shared collections. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
 - **Token budget reservations are conservative**: the worst case is mostly the answer limit (`ANTHROPIC_MAX_TOKENS`, 16,000), so the last ~20k tokens of a day's budget can't be used, and a client that disconnects mid-answer keeps its whole reservation. Prompt sizes are estimated at ~4 characters per token, so text that tokenises more densely can make the estimate low.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
-- **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size, and the fusion weight was picked on this same set. A larger corpus would make Hit@k meaningful.
+- **Golden set size**: 110 questions over 27 chunks separate the retrieval modes and check the fusion weight on held-out questions, but they're still too few to tune `top_k` or chunk size with confidence.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 
 ## License

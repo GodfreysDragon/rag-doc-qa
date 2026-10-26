@@ -84,3 +84,4 @@ jobs:
           if [ "$DB_CONNECTION" = sqlite ]; then touch database/eval.sqlite; fi
           php artisan migrate:fresh --force
           php artisan rag:eval --misses
+          php artisan rag:eval --set=resources/eval/holdout.json --misses
