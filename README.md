@@ -156,20 +156,27 @@ php artisan test                   # 45 tests, no network calls
 
 `php artisan rag:eval` measures how often retrieval finds the right passage. The golden set in [`resources/eval`](resources/eval) has seven fictional company documents (handbook, product manuals, policies, a runbook) and 56 questions. Each question names the document and a phrase the retrieved chunk must contain, so the set doesn't depend on chunk size. The documents deliberately overlap: both product manuals have an error `E-12` that means different things, and two policies have 24-hour reporting rules.
 
-The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and hybrid retrieval. CI runs it on both databases. Results with the offline `hash` embeddings (k=6, 17 chunks):
+The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and hybrid retrieval. CI runs it on both databases with the offline `hash` embeddings. Results (k=6, 17 chunks):
 
-| Mode | SQLite Hit@1 | SQLite MRR | pgvector Hit@1 | pgvector MRR |
+| Mode | `hash` · SQLite | `hash` · pgvector | `nomic-embed-text` (Ollama) · SQLite |
+|---|---|---|---|
+| Vector only | 57% / 0.691 | 57% / 0.691 | 63% / 0.769 |
+| Keyword only | 64% / 0.722 | 61% / 0.694 | 64% / 0.722 |
+| Hybrid (RRF) | **68% / 0.759** | **68% / 0.756** | 64% / **0.773** |
+
+Cells are Hit@1 / MRR. The Ollama column was run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). Hit@1 by question type:
+
+| Question type | `hash` vector | `hash` hybrid | `nomic` vector | `nomic` hybrid |
 |---|---|---|---|---|
-| Vector only | 57% | 0.691 | 57% | 0.691 |
-| Keyword only | 64% | 0.722 | 61% | 0.694 |
-| **Hybrid (RRF)** | **68%** | **0.759** | **68%** | **0.756** |
-
-Hit@1 by question type (hybrid, SQLite / pgvector): exact identifiers 88% / 88%, shared keywords 94% / 94%, paraphrases 29% / 29%.
+| Exact identifiers (17) | 71% | 88% | 65% | 82% |
+| Shared keywords (18) | 94% | 94% | 61% | 72% |
+| Paraphrases (21) | 14% | 29% | **62%** | 43% |
 
 What this shows:
 
-- **Hybrid beats either single mode** on both databases, which is why it's the default.
-- **Paraphrases are the weak spot.** The `hash` baseline only matches words, so "Can I use the robot to mop up spilled water?" never reaches "the HX2 is not a wet-cleaning device". This is the gap a semantic embedding model (`EMBEDDING_PROVIDER=voyage` or `ollama`) is there to close. Re-run `rag:eval` with one to compare.
+- **A semantic model fixes paraphrases.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed": `hash` ranks that passage 4th, `nomic-embed-text` ranks it 1st. Vector-only Hit@1 on paraphrases rises from 14% to 62%, and Hit@3 overall from 77% to 89%.
+- **Keyword search still wins on exact terms.** `nomic` vector search finds the passage first for only 65% of identifier questions and 61% of keyword questions, against 88–89% for keyword search. That's the case for hybrid retrieval.
+- **Equal-weight RRF is a trade-off with a good embedding model.** Hybrid has the best MRR and recovers identifier questions (65% → 82%), but on paraphrases the noisy keyword ranking pulls Hit@1 down from 62% to 43%. The speeding-ticket passage drops out of the hybrid top 6 altogether. Part of this is the small corpus: the 20 vector candidates cover all 17 chunks, so any chunk with a stray keyword match gets a second RRF score. Weighting the two rankings, or re-ranking the fused list, is the next thing to try (see below).
 - **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Keyword-only Hit@1 on exact questions was 65% (vs 88% for the PHP scorer). Indexing content with hyphens replaced by spaces raised it to 82%, and hybrid Hit@1 on Postgres from 64% to 68%.
 
 The corpus also doubles as sample documents to upload and try the app with.
@@ -183,6 +190,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Scanned PDFs** have no text layer. They fail with a clear message; adding OCR (e.g. Tesseract) at the extraction step would fix that.
 - **No auth**: this is a single-user demo. For multi-tenant use, add a `user_id` to documents and scope every query by it.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
+- **Weighted fusion**: with `nomic-embed-text`, equal-weight RRF costs paraphrase accuracy (see the evaluation). Per-ranking weights in `Retriever::fuse()`, tuned with `rag:eval` on a bigger golden set, would let hybrid keep the vector ranking's paraphrase wins.
 - **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 
