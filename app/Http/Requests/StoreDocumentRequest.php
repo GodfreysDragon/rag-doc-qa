@@ -8,7 +8,7 @@ use Illuminate\Foundation\Http\FormRequest;
 class StoreDocumentRequest extends FormRequest
 {
     /**
-     * Single-user demo app: anyone who can reach it may upload.
+     * Any signed-in user may upload; the route requires one and is rate limited.
      */
     public function authorize(): bool
     {

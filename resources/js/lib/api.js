@@ -1,10 +1,21 @@
+import { csrfHeaders, notifySignedOut } from './session';
+
 const BASE = '/api/v1';
 
 async function request(path, options = {}) {
     const response = await fetch(`${BASE}${path}`, {
         ...options,
-        headers: { Accept: 'application/json', ...(options.headers ?? {}) },
+        headers: {
+            Accept: 'application/json',
+            ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+            ...csrfHeaders(),
+            ...(options.headers ?? {}),
+        },
     });
+
+    if (response.status === 401 && !options.quietUnauthenticated) {
+        notifySignedOut();
+    }
 
     if (response.status === 204) {
         return null;
@@ -14,13 +25,34 @@ async function request(path, options = {}) {
 
     if (!response.ok) {
         const firstError = body.errors ? Object.values(body.errors)[0]?.[0] : null;
-        throw new Error(firstError ?? body.message ?? `Request failed (${response.status})`);
+        const error = new Error(firstError ?? body.message ?? `Request failed (${response.status})`);
+        error.status = response.status;
+        throw error;
     }
 
     return body;
 }
 
 export const api = {
+    /** The signed-in user, or null for a guest. */
+    currentUser: () =>
+        request('/user', { quietUnauthenticated: true })
+            .then((body) => body.data)
+            .catch((e) => {
+                if (e.status === 401) {
+                    return null;
+                }
+                throw e;
+            }),
+
+    login: (credentials) =>
+        request('/login', { method: 'POST', body: JSON.stringify(credentials), quietUnauthenticated: true }).then((body) => body.data),
+
+    register: (details) =>
+        request('/register', { method: 'POST', body: JSON.stringify(details), quietUnauthenticated: true }).then((body) => body.data),
+
+    logout: () => request('/logout', { method: 'POST' }),
+
     listDocuments: () => request('/documents').then((body) => body.data),
 
     getDocument: (id) => request(`/documents/${id}`).then((body) => body.data),
@@ -40,6 +72,9 @@ export const api = {
             const xhr = new XMLHttpRequest();
             xhr.open('POST', `${BASE}/documents`);
             xhr.setRequestHeader('Accept', 'application/json');
+            for (const [name, value] of Object.entries(csrfHeaders())) {
+                xhr.setRequestHeader(name, value);
+            }
             xhr.upload.addEventListener('progress', (event) => {
                 if (event.lengthComputable) {
                     onProgress(event.loaded / event.total);
@@ -51,6 +86,10 @@ export const api = {
                     body = JSON.parse(xhr.responseText);
                 } catch {
                     // Non-JSON error page; fall through to the generic message.
+                }
+
+                if (xhr.status === 401) {
+                    notifySignedOut();
                 }
 
                 if (xhr.status >= 200 && xhr.status < 300) {

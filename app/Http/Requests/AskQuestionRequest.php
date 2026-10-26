@@ -4,11 +4,12 @@ namespace App\Http\Requests;
 
 use Illuminate\Contracts\Validation\ValidationRule;
 use Illuminate\Foundation\Http\FormRequest;
+use Illuminate\Validation\Rule;
 
 class AskQuestionRequest extends FormRequest
 {
     /**
-     * Single-user demo app: anyone who can reach it may ask.
+     * The route requires a signed-in user; documents are scoped below.
      */
     public function authorize(): bool
     {
@@ -26,17 +27,24 @@ class AskQuestionRequest extends FormRequest
             'history.*.role' => ['required', 'string', 'in:user,assistant'],
             'history.*.content' => ['required', 'string', 'max:20000'],
             'document_ids' => ['sometimes', 'nullable', 'array'],
-            'document_ids.*' => ['integer', 'exists:documents,id'],
+            'document_ids.*' => ['integer', Rule::exists('documents', 'id')->where('user_id', $this->user()->id)],
         ];
     }
 
     /**
-     * @return list<int>|null
+     * The documents to search: the selected ones, or else all of the user's.
+     * Never null, so retrieval can't fall through to other users' documents.
+     *
+     * @return list<int>
      */
-    public function documentIds(): ?array
+    public function documentIds(): array
     {
         $ids = $this->validated('document_ids');
 
-        return empty($ids) ? null : array_values(array_map('intval', $ids));
+        if (! empty($ids)) {
+            return array_values(array_map('intval', $ids));
+        }
+
+        return $this->user()->documents()->pluck('id')->all();
     }
 }

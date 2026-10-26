@@ -7,9 +7,10 @@ const props = defineProps({
     loading: { type: Boolean, default: false },
     error: { type: String, default: null },
     selectedIds: { type: Set, required: true },
+    user: { type: Object, required: true },
 });
 
-const emit = defineEmits(['upload', 'dismiss-upload', 'remove', 'reprocess', 'toggle', 'clear-selection']);
+const emit = defineEmits(['upload', 'dismiss-upload', 'remove', 'reprocess', 'toggle', 'clear-selection', 'sign-out']);
 
 const fileInput = ref(null);
 const dragging = ref(false);
@@ -184,5 +185,10 @@ const statusClass = {
                 </div>
             </div>
         </div>
+
+        <footer class="flex items-center justify-between gap-2 border-t border-line px-5 py-3 text-xs">
+            <span class="truncate text-muted" :title="props.user.email">{{ props.user.name }}</span>
+            <button type="button" class="shrink-0 text-muted hover:text-ink" @click="emit('sign-out')">Sign out</button>
+        </footer>
     </div>
 </template>

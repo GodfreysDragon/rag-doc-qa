@@ -9,27 +9,29 @@ use App\Http\Resources\DocumentResource;
 use App\Jobs\ProcessDocument;
 use App\Models\Document;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\AnonymousResourceCollection;
 use Illuminate\Http\Response;
+use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Facades\Storage;
 
 class DocumentController extends Controller
 {
-    public function index(): AnonymousResourceCollection
+    public function index(Request $request): AnonymousResourceCollection
     {
-        return DocumentResource::collection(Document::query()->latest('id')->get());
+        return DocumentResource::collection($request->user()->documents()->latest('id')->get());
     }
 
     /**
      * Store the upload and queue it for chunking + embedding. Uploading the
-     * same bytes twice returns the existing document instead of re-indexing.
+     * same bytes twice returns the user's existing document instead of
+     * re-indexing.
      */
     public function store(StoreDocumentRequest $request): JsonResponse
     {
         $file = $request->file('file');
         $hash = hash_file('sha256', $file->getRealPath());
-
-        $existing = Document::query()->where('content_hash', $hash)->first();
+        $existing = $request->user()->documents()->where('content_hash', $hash)->first();
 
         if ($existing !== null) {
             return DocumentResource::make($existing)
@@ -40,7 +42,7 @@ class DocumentController extends Controller
 
         $originalName = $file->getClientOriginalName();
 
-        $document = Document::create([
+        $document = $request->user()->documents()->create([
             'title' => $request->validated('title') ?: str(pathinfo($originalName, PATHINFO_FILENAME))->replace(['_', '-'], ' ')->squish()->toString(),
             'original_name' => $originalName,
             'path' => $file->store('documents', 'local'),
@@ -59,11 +61,15 @@ class DocumentController extends Controller
 
     public function show(Document $document): DocumentResource
     {
+        Gate::authorize('manage', $document);
+
         return DocumentResource::make($document);
     }
 
     public function reprocess(Document $document): DocumentResource
     {
+        Gate::authorize('manage', $document);
+
         $document->update(['status' => DocumentStatus::Pending, 'error' => null]);
 
         ProcessDocument::dispatch($document);
@@ -73,6 +79,8 @@ class DocumentController extends Controller
 
     public function destroy(Document $document): Response
     {
+        Gate::authorize('manage', $document);
+
         Storage::disk('local')->delete($document->path);
 
         $document->chunks()->delete();

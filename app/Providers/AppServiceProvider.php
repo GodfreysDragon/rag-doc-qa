@@ -12,11 +12,15 @@ use App\Services\Rag\Embeddings\VoyageEmbeddingProvider;
 use App\Services\Rag\Llm\ChatModel;
 use App\Services\Rag\Llm\ClaudeChatModel;
 use App\Services\Rag\Retrieval\Retriever;
+use App\Services\Rag\TokenBudget;
 use App\Services\Rag\VectorStores\DatabaseVectorStore;
 use App\Services\Rag\VectorStores\PgvectorStore;
 use App\Services\Rag\VectorStores\VectorStore;
+use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Contracts\Foundation\Application;
 use Illuminate\Foundation\Console\ServeCommand;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
 use InvalidArgumentException;
 
@@ -81,6 +85,12 @@ class AppServiceProvider extends ServiceProvider
             minScore: config('rag.retrieval.min_score'),
         ));
 
+        $this->app->bind(TokenBudget::class, fn (Application $app): TokenBudget => new TokenBudget(
+            cache: $app->make('cache.store'),
+            dailyPerUser: config('rag.limits.daily_tokens_per_user'),
+            dailyTotal: config('rag.limits.daily_tokens_total'),
+        ));
+
         $this->app->bind(DocumentChat::class, fn (Application $app): DocumentChat => new DocumentChat(
             retriever: $app->make(Retriever::class),
             llm: $app->make(ChatModel::class),
@@ -100,5 +110,23 @@ class AppServiceProvider extends ServiceProvider
          * uploads ("unable to create a temporary file").
          */
         array_push(ServeCommand::$passthroughVariables, 'TEMP', 'TMP');
+
+        RateLimiter::for('uploads', fn (Request $request): Limit => $this->perUser(
+            Limit::perHour(config('rag.limits.uploads_per_hour')),
+            $request,
+        ));
+
+        RateLimiter::for('questions', fn (Request $request): Limit => $this->perUser(
+            Limit::perMinute(config('rag.limits.questions_per_minute')),
+            $request,
+        ));
+    }
+
+    /**
+     * Key a limit by user (these routes require one); a limit of 0 means unlimited.
+     */
+    private function perUser(Limit $limit, Request $request): Limit
+    {
+        return $limit->maxAttempts > 0 ? $limit->by((string) $request->user()?->id) : Limit::none();
     }
 }

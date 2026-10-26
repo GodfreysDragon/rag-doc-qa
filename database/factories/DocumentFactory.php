@@ -4,6 +4,7 @@ namespace Database\Factories;
 
 use App\Enums\DocumentStatus;
 use App\Models\Document;
+use App\Models\User;
 use Illuminate\Database\Eloquent\Factories\Factory;
 
 /**
@@ -21,6 +22,7 @@ class DocumentFactory extends Factory
         $name = fake()->unique()->slug(3).'.txt';
 
         return [
+            'user_id' => User::factory(),
             'title' => str($name)->beforeLast('.')->headline()->toString(),
             'original_name' => $name,
             'path' => 'documents/'.$name,
