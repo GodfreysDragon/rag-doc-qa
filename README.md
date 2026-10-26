@@ -25,7 +25,7 @@ QUERY TIME (SSE stream)
   question ─► rewrite follow-ups into a standalone query (LLM, low effort)
            ─► embed query (input_type=query)
            ─► vector search (cosine, top 20) ─┐
-           ─► keyword search (ts_rank, top 20)┴► Reciprocal Rank Fusion ─► top 6
+           ─► keyword search (ts_rank, top 20)┴► weighted score fusion ─► top 6
            ─► grounded prompt with numbered <source> blocks
            ─► Claude streams an answer citing [n] ─► Vue renders clickable citations
 ```
@@ -39,7 +39,7 @@ QUERY TIME (SSE stream)
 | **Asymmetric embeddings** | Separate `embedDocuments()` / `embedQuery()` | Retrieval models (Voyage `input_type`, nomic `search_query:` prefixes) encode short questions and long passages differently. |
 | **Normalisation** | Every vector is L2-normalised before storage | Cosine similarity becomes a dot product, which the PHP fallback relies on. |
 | **Vector index** | pgvector HNSW with `vector_cosine_ops` | Approximate nearest-neighbour search in SQL, so queries don't scan the whole table. |
-| **Hybrid search** | Dense + full-text, merged with RRF (k=60) | Embeddings blur exact tokens (SKUs, names, acronyms) and keyword search catches them. RRF only uses ranks, so cosine scores and `ts_rank` never need calibrating against each other. |
+| **Hybrid search** | Dense + full-text, merged by weighted score fusion: each list's scores scaled to 0–1, then 0.6 × vector + 0.4 × keyword. RRF (k=60) is still available with `RAG_FUSION=rrf` | Embeddings blur exact tokens (SKUs, names, acronyms) and keyword search catches them. Scaling each list to 0–1 means cosine scores and `ts_rank` never need calibrating against each other. Unlike RRF, a chunk that's the clear best on one side keeps its lead (see the evaluation). |
 | **Query rewriting** | Only when there's history | "What about the second one?" embeds badly on its own, so it's rewritten into a standalone query first. The first turn skips that LLM call. |
 | **Grounding** | Sources in tagged blocks with ids; the system prompt requires `[n]` citations, a plain "not in the documents" when the sources don't cover it, and treats source text as data | Cuts down on hallucination and prompt injection from uploaded files, and makes every claim checkable in the UI. |
 | **Citation highlighting** | Clicking `[n]` matches the claim before it against the sentences of source `n` (shared terms, numbers weighted double) and highlights the best match | A citation points at a whole ~300-token chunk; this narrows it to the sentence a reader actually needs to check. Done client-side, so it costs no extra LLM call. |
@@ -160,34 +160,36 @@ php artisan rag:reindex --queue    # dispatch to the queue instead of running in
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
 php artisan rag:eval-answers       # answer quality with the real LLM and an LLM judge (costs tokens)
-php artisan test                   # 69 tests, no network calls
+php artisan test                   # 72 tests, no network calls
 ```
 
 ## Retrieval evaluation
 
 `php artisan rag:eval` measures how often retrieval finds the right passage. The golden set in [`resources/eval`](resources/eval) has seven fictional company documents (handbook, product manuals, policies, a runbook) and 56 questions. Each question names the document and a phrase the retrieved chunk must contain, so the set doesn't depend on chunk size. The documents deliberately overlap: both product manuals have an error `E-12` that means different things, and two policies have 24-hour reporting rules.
 
-The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and hybrid retrieval. CI runs it on both databases with the offline `hash` embeddings. Results (k=6, 17 chunks):
+The command indexes the corpus with the real ingestion pipeline inside a database transaction that is always rolled back, then runs every question through vector-only, keyword-only and both hybrid fusions: Reciprocal Rank Fusion (RRF) and weighted score fusion, the default. CI runs it on both databases with the offline `hash` embeddings. Results (k=6, 17 chunks):
 
 | Mode | `hash` · SQLite | `hash` · pgvector | `nomic-embed-text` (Ollama) · SQLite |
 |---|---|---|---|
-| Vector only | 57% / 0.691 | 57% / 0.691 | 63% / 0.769 |
-| Keyword only | 64% / 0.722 | 61% / 0.694 | 64% / 0.722 |
-| Hybrid (RRF) | **68% / 0.759** | **68% / 0.756** | 64% / **0.773** |
+| Vector only | 61% / 0.717 | 61% / 0.717 | 66% / 0.785 |
+| Keyword only | 68% / 0.750 | 63% / 0.722 | 68% / 0.750 |
+| Hybrid, RRF | 66% / 0.760 | 68% / **0.766** | 64% / 0.775 |
+| Hybrid, weighted (default) | **70% / 0.774** | 68% / 0.763 | **71% / 0.838** |
 
-Cells are Hit@1 / MRR. The Ollama column was run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). Hit@1 by question type:
+Cells are Hit@1 / MRR. The Ollama column was run locally (`ollama pull nomic-embed-text`, then `EMBEDDING_PROVIDER=ollama EMBEDDING_DIMENSIONS=768 php artisan rag:eval` on a fresh database). With `nomic-embed-text`, weighted fusion finds the expected passage in the top 6 for all 56 questions (RRF: 53). Hit@1 by question type:
 
-| Question type | `hash` vector | `hash` hybrid | `nomic` vector | `nomic` hybrid |
-|---|---|---|---|---|
-| Exact identifiers (17) | 71% | 88% | 65% | 82% |
-| Shared keywords (18) | 94% | 94% | 61% | 72% |
-| Paraphrases (21) | 14% | 29% | **62%** | 43% |
+| Question type | `hash` vector | `hash` RRF | `hash` weighted | `nomic` vector | `nomic` RRF | `nomic` weighted |
+|---|---|---|---|---|---|---|
+| Exact identifiers (17) | 76% | 88% | **94%** | 65% | 76% | **88%** |
+| Shared keywords (18) | 94% | 94% | 94% | 83% | 83% | **94%** |
+| Paraphrases (21) | 19% | 24% | 29% | **52%** | 38% | 38% |
 
 What this shows:
 
-- **A semantic model fixes paraphrases.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed": `hash` ranks that passage 4th, `nomic-embed-text` ranks it 1st. Vector-only Hit@1 on paraphrases rises from 14% to 62%, and Hit@3 overall from 77% to 89%.
-- **Keyword search still wins on exact terms.** `nomic` vector search finds the passage first for only 65% of identifier questions and 61% of keyword questions, against 88–89% for keyword search. That's the case for hybrid retrieval.
-- **Equal-weight RRF is a trade-off with a good embedding model.** Hybrid has the best MRR and recovers identifier questions (65% → 82%), but on paraphrases the noisy keyword ranking pulls Hit@1 down from 62% to 43%. The speeding-ticket passage drops out of the hybrid top 6 altogether. Part of this is the small corpus: the 20 vector candidates cover all 17 chunks, so any chunk with a stray keyword match gets a second RRF score. Weighting the two rankings, or re-ranking the fused list, is the next thing to try (see below).
+- **A semantic model fixes paraphrases.** "Will the company pay my speeding ticket?" shares no words with "Fines for traffic or parking violations are never reimbursed", but `nomic-embed-text` ranks that passage 1st. Vector-only Hit@1 on paraphrases rises from 19% with `hash` to 52%, and Hit@3 overall from 80% to 91%.
+- **Keyword search still wins on exact terms.** `nomic` vector search finds the passage first for only 65% of identifier questions, against 88% for keyword search. That's the case for hybrid retrieval.
+- **RRF lost the vector ranking's best hits.** RRF adds 1 / (60 + rank) for each list a chunk is in, so a chunk that's mediocre in both lists beats one that's 1st in one list and absent from the other. With `nomic`, the speeding-ticket passage was 1st for vector search, had no keyword match, and fell to 9th. Part of this is the small corpus: the 20 candidates cover all 17 chunks, so almost every chunk gets a second RRF score.
+- **Weighted score fusion keeps them.** Each list's scores are scaled to 0–1 (best = 1) and combined as 0.6 × vector + 0.4 × keyword, so a clear winner on one side keeps most of its lead. With `nomic` it lifts MRR from 0.775 to 0.838 and fixes all three RRF misses. With `hash` the two fusions are close (better on SQLite, a tie on Postgres), because `hash` vectors are themselves lexical. The weight was picked from 0.5–0.9 on this golden set, so it's tuned to it; a larger set would confirm it.
 - **The evaluation caught a Postgres tokenisation bug.** The default text-search parser reads `E-417` as the word `e` plus the negative number `-417`, so a search for `417` never matched it. Keyword-only Hit@1 on exact questions was 65% (vs 88% for the PHP scorer). Indexing content with hyphens replaced by spaces raised it to 82%, and hybrid Hit@1 on Postgres from 64% to 68%.
 
 The corpus also doubles as sample documents to upload and try the app with.
@@ -221,7 +223,7 @@ Caveat: the judge is the same model that wrote the answers, so it may be lenient
 
 ## Configuration reference
 
-All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the RRF constant, minimum similarity, query rewriting, history length, model and effort.
+All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, `top_k`, candidate pool size, hybrid on/off, the fusion method and vector weight, the RRF constant, minimum similarity, query rewriting, history length, model and effort.
 
 ## Limitations / next steps
 
@@ -229,8 +231,7 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Accounts are basic**: email and password only, with no email verification, password reset or roles. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
 - **Token budget granularity**: the budget is checked before an answer starts, so the last answer of the day can overshoot it. Query-rewrite calls aren't counted, because the model reports usage only for the streamed answer.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
-- **Weighted fusion**: with `nomic-embed-text`, equal-weight RRF costs paraphrase accuracy (see the evaluation). Per-ranking weights in `Retriever::fuse()`, tuned with `rag:eval` on a bigger golden set, would let hybrid keep the vector ranking's paraphrase wins.
-- **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
+- **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size, and the fusion weight was picked on this same set. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
 
 ## License
