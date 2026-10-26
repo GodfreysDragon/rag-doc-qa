@@ -47,8 +47,8 @@ class DocumentChat
      * An upper estimate of the tokens answering will use, for reserving
      * budget before the answer starts: the longest prompt this question can
      * produce (system prompt, history, every retrieved source at full chunk
-     * size) at ~4 characters per token, the longest answer allowed, and the
-     * query rewrite when there is history.
+     * size) at ~4 characters per token, the longest answer allowed, the
+     * query rewrite when there is history, and the re-ranker if there is one.
      *
      * @param  list<array{role: string, content: string}>  $history
      */
@@ -59,7 +59,7 @@ class DocumentChat
 
         // Source tags, ids and titles add a little on top of the chunk text.
         $promptChars = mb_strlen(self::SYSTEM_PROMPT) + $historyChars + mb_strlen($question) + (int) ($this->maxSourceChars * 1.2);
-        $ceiling = (int) ceil($promptChars / 4) + $this->maxAnswerTokens;
+        $ceiling = (int) ceil($promptChars / 4) + $this->maxAnswerTokens + $this->retriever->rerankTokenCeiling();
 
         if ($this->rewriteQueries && $history !== []) {
             $rewriteChars = mb_strlen(self::REWRITE_PROMPT) + count($history) * 1500 + mb_strlen($question);
@@ -81,7 +81,9 @@ class DocumentChat
         [$searchQuery, $rewriteUsage] = $this->standaloneQuery($question, $history);
         yield ['type' => 'query', 'query' => $searchQuery];
 
-        $sources = $this->retriever->retrieve($searchQuery, $documentIds);
+        [$sources, $rerankUsage] = $this->retriever->retrieveWithUsage($searchQuery, $documentIds);
+        $extraUsage = self::addUsage($rewriteUsage, $rerankUsage);
+
         yield ['type' => 'sources', 'sources' => array_map(
             fn (RetrievedChunk $chunk, int $index): array => ['id' => $index + 1, ...$chunk->toArray()],
             $sources,
@@ -90,7 +92,7 @@ class DocumentChat
 
         if ($sources === []) {
             yield ['type' => 'text', 'text' => self::NO_CONTEXT_ANSWER];
-            yield ['type' => 'done', 'stop_reason' => 'no_context', 'model' => null, 'usage' => $rewriteUsage];
+            yield ['type' => 'done', 'stop_reason' => 'no_context', 'model' => null, 'usage' => $extraUsage];
 
             return;
         }
@@ -100,16 +102,32 @@ class DocumentChat
             ['role' => 'user', 'content' => $this->buildPrompt($question, $sources)],
         ];
 
-        // The done event's usage covers the whole question: the rewrite and the answer.
+        // The done event's usage covers the whole question: the rewrite, re-ranking and the answer.
         foreach ($this->llm->stream(self::SYSTEM_PROMPT, $messages) as $event) {
-            if ($event['type'] === 'done' && $rewriteUsage !== null) {
-                foreach ($rewriteUsage as $kind => $tokens) {
-                    $event['usage'][$kind] = ($event['usage'][$kind] ?? 0) + $tokens;
-                }
+            if ($event['type'] === 'done') {
+                $event['usage'] = self::addUsage($event['usage'] ?? null, $extraUsage);
             }
 
             yield $event;
         }
+    }
+
+    /**
+     * @param  array<string, int>|null  $a
+     * @param  array<string, int>|null  $b
+     * @return array<string, int>|null
+     */
+    private static function addUsage(?array $a, ?array $b): ?array
+    {
+        if ($a === null || $b === null) {
+            return $a ?? $b;
+        }
+
+        foreach ($b as $kind => $tokens) {
+            $a[$kind] = ($a[$kind] ?? 0) + $tokens;
+        }
+
+        return $a;
     }
 
     /**

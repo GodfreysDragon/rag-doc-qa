@@ -3,6 +3,7 @@
 namespace App\Services\Rag\Evaluation;
 
 use App\Services\Rag\Embeddings\EmbeddingProvider;
+use App\Services\Rag\Retrieval\Reranker;
 use App\Services\Rag\Retrieval\RetrievedChunk;
 use App\Services\Rag\Retrieval\Retriever;
 use App\Services\Rag\VectorStores\VectorStore;
@@ -15,8 +16,9 @@ use InvalidArgumentException;
  * The corpus is indexed by EvaluationCorpus inside a transaction that is
  * always rolled back. Each question is then run through vector-only,
  * keyword-only and both kinds of hybrid retrieval (rank fusion and weighted
- * score fusion), recording the rank of the first chunk
- * that comes from the expected document and contains the expected phrase.
+ * score fusion), optionally followed by a re-ranker, recording the rank of the
+ * first chunk that comes from the expected document and contains the expected
+ * phrase.
  */
 class RetrievalEvaluator
 {
@@ -31,15 +33,17 @@ class RetrievalEvaluator
     /**
      * @param  list<string>  $corpusFiles  Absolute paths of the documents to index.
      * @param  list<array{category: string, question: string, document: string, expect: string}>  $cases
-     * @return array{chunk_count: int, results: list<array{category: string, question: string, document: string, expect: string, ranks: array<string, int|null>}>}
+     * @param  Reranker|null  $reranker  Also evaluate weighted fusion followed by this re-ranker, as mode "reranked".
+     * @return array{chunk_count: int, rerank_usage: array{input_tokens: int, output_tokens: int}, results: list<array{category: string, question: string, document: string, expect: string, ranks: array<string, int|null>}>}
      */
-    public function evaluate(array $corpusFiles, array $cases, int $topK, int $candidates, int $rrfK, float $vectorWeight): array
+    public function evaluate(array $corpusFiles, array $cases, int $topK, int $candidates, int $rrfK, float $vectorWeight, ?Reranker $reranker = null): array
     {
-        return $this->corpus->using($corpusFiles, function (array $documentIds, int $chunkCount) use ($cases, $topK, $candidates, $rrfK, $vectorWeight): array {
+        return $this->corpus->using($corpusFiles, function (array $documentIds, int $chunkCount) use ($cases, $topK, $candidates, $rrfK, $vectorWeight, $reranker): array {
             $scope = array_values($documentIds);
+            $rerankUsage = ['input_tokens' => 0, 'output_tokens' => 0];
 
-            $hybrid = fn (string $fusion): Retriever => new Retriever(
-                $this->embeddings, $this->store, topK: $topK, candidates: $candidates, rrfK: $rrfK, fusion: $fusion, vectorWeight: $vectorWeight,
+            $hybrid = fn (string $fusion, int $limit = 0): Retriever => new Retriever(
+                $this->embeddings, $this->store, topK: $limit ?: $topK, candidates: $candidates, rrfK: $rrfK, fusion: $fusion, vectorWeight: $vectorWeight,
             );
 
             $retrievers = [
@@ -49,6 +53,20 @@ class RetrievalEvaluator
                 'rrf' => fn (string $question): array => $hybrid('rrf')->retrieve($question, $scope),
                 'weighted' => fn (string $question): array => $hybrid('weighted')->retrieve($question, $scope),
             ];
+
+            // Called directly rather than through Retriever, which falls back to the
+            // fused order on errors: a failed re-ranking must fail the evaluation.
+            if ($reranker !== null) {
+                $retrievers['reranked'] = function (string $question) use ($hybrid, $reranker, $scope, $candidates, $topK, &$rerankUsage): array {
+                    $reranking = $reranker->rerank($question, $hybrid('weighted', $candidates)->retrieve($question, $scope), $topK);
+
+                    foreach ($reranking->usage ?? [] as $kind => $tokens) {
+                        $rerankUsage[$kind] += $tokens;
+                    }
+
+                    return $reranking->chunks;
+                };
+            }
 
             $results = [];
 
@@ -63,7 +81,7 @@ class RetrievalEvaluator
                 $results[] = [...$case, 'ranks' => $ranks];
             }
 
-            return ['chunk_count' => $chunkCount, 'results' => $results];
+            return ['chunk_count' => $chunkCount, 'rerank_usage' => $rerankUsage, 'results' => $results];
         });
     }
 

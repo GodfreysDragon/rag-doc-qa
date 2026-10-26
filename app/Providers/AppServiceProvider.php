@@ -13,7 +13,10 @@ use App\Services\Rag\Evaluation\AnswerEvaluator;
 use App\Services\Rag\Evaluation\EvaluationCorpus;
 use App\Services\Rag\Llm\ChatModel;
 use App\Services\Rag\Llm\ClaudeChatModel;
+use App\Services\Rag\Retrieval\ClaudeReranker;
+use App\Services\Rag\Retrieval\Reranker;
 use App\Services\Rag\Retrieval\Retriever;
+use App\Services\Rag\Retrieval\VoyageReranker;
 use App\Services\Rag\TokenBudget;
 use App\Services\Rag\VectorStores\DatabaseVectorStore;
 use App\Services\Rag\VectorStores\PgvectorStore;
@@ -87,6 +90,8 @@ class AppServiceProvider extends ServiceProvider
             minScore: config('rag.retrieval.min_score'),
             fusion: config('rag.retrieval.fusion'),
             vectorWeight: config('rag.retrieval.vector_weight'),
+            reranker: self::reranker($app, config('rag.retrieval.reranker')),
+            rerankCandidates: config('rag.retrieval.rerank.candidates'),
         ));
 
         $this->app->bind(TokenBudget::class, fn (Application $app): TokenBudget => new TokenBudget(
@@ -109,6 +114,29 @@ class AppServiceProvider extends ServiceProvider
             chat: $app->make(DocumentChat::class),
             judge: $app->make(ChatModel::class)->withModel(self::judgeModel()),
         ));
+    }
+
+    /**
+     * The re-ranker called $name ("none", "claude" or "voyage"), or null for none.
+     */
+    public static function reranker(Application $app, ?string $name): ?Reranker
+    {
+        $config = config('rag.retrieval.rerank');
+
+        return match ($name ?: 'none') {
+            'none' => null,
+            'claude' => new ClaudeReranker(
+                llm: $app->make(ChatModel::class)->withModel($config['claude_model']),
+                model: $config['claude_model'],
+                maxPassageChars: (int) (config('rag.chunking.size') * 1.25),
+            ),
+            'voyage' => new VoyageReranker(
+                apiKey: config('rag.embeddings.voyage.api_key'),
+                model: $config['voyage_model'],
+                url: $config['voyage_url'],
+            ),
+            default => throw new InvalidArgumentException("Unknown reranker [{$name}]; use none, claude or voyage."),
+        };
     }
 
     /**

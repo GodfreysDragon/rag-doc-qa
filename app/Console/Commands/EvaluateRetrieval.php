@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Providers\AppServiceProvider;
 use App\Services\Rag\Embeddings\EmbeddingProvider;
 use App\Services\Rag\Evaluation\RetrievalEvaluator;
 use Illuminate\Console\Attributes\Description;
@@ -12,7 +13,8 @@ use Illuminate\Support\Facades\DB;
 #[Signature('rag:eval
     {--set= : Path to a golden-set JSON file; its corpus is read from a corpus/ folder next to it}
     {--k= : How many chunks to retrieve per question (defaults to rag.retrieval.top_k)}
-    {--misses : List the questions that the configured hybrid fusion missed}
+    {--rerank= : Also evaluate weighted fusion followed by this re-ranker (claude or voyage); makes one API call per question}
+    {--misses : List the questions that the configured hybrid fusion (or the re-ranker) missed}
     {--json : Print the results as JSON instead of tables}')]
 #[Description('Measure retrieval quality (hit rate and MRR) for vector, keyword and hybrid (RRF and weighted) search on a golden set')]
 class EvaluateRetrieval extends Command
@@ -22,6 +24,8 @@ class EvaluateRetrieval extends Command
      */
     public function handle(RetrievalEvaluator $evaluator, EmbeddingProvider $embeddings): int
     {
+        $reranker = AppServiceProvider::reranker($this->laravel, $this->option('rerank'));
+
         $setPath = $this->option('set') ?: resource_path('eval/questions.json');
 
         if (! is_file($setPath)) {
@@ -35,20 +39,24 @@ class EvaluateRetrieval extends Command
         $corpusFiles = glob(dirname($setPath).'/corpus/*.{md,txt,pdf,docx}', GLOB_BRACE) ?: [];
         $topK = (int) ($this->option('k') ?: config('rag.retrieval.top_k'));
 
-        ['chunk_count' => $chunkCount, 'results' => $results] = $evaluator->evaluate(
+        ['chunk_count' => $chunkCount, 'rerank_usage' => $rerankUsage, 'results' => $results] = $evaluator->evaluate(
             $corpusFiles,
             $cases,
             topK: $topK,
             candidates: max($topK, (int) config('rag.retrieval.candidates')),
             rrfK: (int) config('rag.retrieval.rrf_k'),
             vectorWeight: (float) config('rag.retrieval.vector_weight'),
+            reranker: $reranker,
         );
 
-        $summary = $this->summarise($results);
+        $modes = $reranker === null ? RetrievalEvaluator::MODES : [...RetrievalEvaluator::MODES, 'reranked'];
+        $summary = $this->summarise($results, $modes);
 
         if ($this->option('json')) {
             $this->line(json_encode([
                 'embedding_model' => $embeddings->modelName(),
+                'reranker' => $reranker?->name(),
+                'rerank_usage' => $reranker === null ? null : $rerankUsage,
                 'database' => DB::connection()->getDriverName(),
                 'k' => $topK,
                 'chunk_count' => $chunkCount,
@@ -80,19 +88,28 @@ class EvaluateRetrieval extends Command
             ])->values()->all(),
         );
 
+        if ($reranker !== null) {
+            $this->line(sprintf(
+                'Re-ranked by [%s]: %s input / %s output LLM tokens.',
+                $reranker->name(),
+                number_format($rerankUsage['input_tokens']),
+                number_format($rerankUsage['output_tokens']),
+            ));
+        }
+
         $this->newLine();
         $this->line('Hit@1 by question type:');
         $this->table(
-            ['Category', 'Questions', ...RetrievalEvaluator::MODES],
+            ['Category', 'Questions', ...$modes],
             collect($summary['by_category'])->map(fn (array $category, string $name): array => [
                 $name,
                 $category['questions'],
-                ...array_map(fn (string $mode): string => $this->percent($category['hit_at_1'][$mode]), RetrievalEvaluator::MODES),
+                ...array_map(fn (string $mode): string => $this->percent($category['hit_at_1'][$mode]), $modes),
             ])->values()->all(),
         );
 
         if ($this->option('misses')) {
-            $fusion = config('rag.retrieval.fusion');
+            $fusion = $reranker === null ? config('rag.retrieval.fusion') : 'reranked';
             $misses = array_filter($results, fn (array $result): bool => $result['ranks'][$fusion] === null);
 
             $this->newLine();
@@ -108,15 +125,16 @@ class EvaluateRetrieval extends Command
 
     /**
      * @param  list<array{category: string, ranks: array<string, int|null>}>  $results
+     * @param  list<string>  $modes
      * @return array{overall: array<string, array{hit_at_1: float, hit_at_3: float, hit_at_k: float, mrr: float}>, by_category: array<string, array{questions: int, hit_at_1: array<string, float>}>}
      */
-    private function summarise(array $results): array
+    private function summarise(array $results, array $modes): array
     {
         $ranksFor = fn (array $subset, string $mode): array => array_map(fn (array $result): ?int => $result['ranks'][$mode], $subset);
 
         $overall = [];
 
-        foreach (RetrievalEvaluator::MODES as $mode) {
+        foreach ($modes as $mode) {
             $overall[$mode] = RetrievalEvaluator::metrics($ranksFor($results, $mode));
         }
 
@@ -124,7 +142,7 @@ class EvaluateRetrieval extends Command
             ->groupBy('category')
             ->map(fn ($subset): array => [
                 'questions' => $subset->count(),
-                'hit_at_1' => collect(RetrievalEvaluator::MODES)
+                'hit_at_1' => collect($modes)
                     ->mapWithKeys(fn (string $mode): array => [$mode => RetrievalEvaluator::metrics($ranksFor($subset->all(), $mode))['hit_at_1']])
                     ->all(),
             ])

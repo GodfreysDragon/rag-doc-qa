@@ -4,7 +4,9 @@ namespace App\Services\Rag\Retrieval;
 
 use App\Services\Rag\Embeddings\EmbeddingProvider;
 use App\Services\Rag\VectorStores\VectorStore;
+use Illuminate\Support\Facades\Log;
 use InvalidArgumentException;
+use Throwable;
 
 /**
  * Hybrid retrieval: dense vector search + lexical keyword search, fused into
@@ -16,6 +18,9 @@ use InvalidArgumentException;
  * Reciprocal Rank Fusion (Cormack et al., 2009), Σ 1 / (k + rank); it only
  * uses ranks, but it rewards any chunk that appears in both lists, so a weak
  * keyword match can push the top vector hit out of the results.
+ *
+ * An optional re-ranker then re-orders the best fused candidates; if it fails,
+ * the fused order is used.
  */
 class Retriever
 {
@@ -31,6 +36,8 @@ class Retriever
         private readonly float $minScore = 0.0,
         private readonly string $fusion = 'weighted',
         private readonly float $vectorWeight = 0.6,
+        private readonly ?Reranker $reranker = null,
+        private readonly int $rerankCandidates = 20,
     ) {
         if (! in_array($fusion, self::FUSIONS, true)) {
             throw new InvalidArgumentException("Unknown fusion [{$fusion}]; use one of: ".implode(', ', self::FUSIONS).'.');
@@ -47,6 +54,50 @@ class Retriever
      */
     public function retrieve(string $query, ?array $documentIds = null): array
     {
+        return $this->retrieveWithUsage($query, $documentIds)[0];
+    }
+
+    /**
+     * Retrieve, also returning the LLM tokens the re-ranker used (null if none).
+     *
+     * @param  list<int>|null  $documentIds
+     * @return array{0: list<RetrievedChunk>, 1: array{input_tokens: int, output_tokens: int}|null}
+     */
+    public function retrieveWithUsage(string $query, ?array $documentIds = null): array
+    {
+        if ($this->reranker === null) {
+            return [$this->firstStage($query, $documentIds, $this->topK), null];
+        }
+
+        $candidates = $this->firstStage($query, $documentIds, max($this->topK, $this->rerankCandidates));
+
+        try {
+            $reranking = $this->reranker->rerank($query, $candidates, $this->topK);
+
+            return [$reranking->chunks, $reranking->usage];
+        } catch (Throwable $exception) {
+            Log::warning('Re-ranking failed; using the fused order.', ['exception' => $exception->getMessage()]);
+
+            return [array_slice($candidates, 0, $this->topK), null];
+        }
+    }
+
+    /**
+     * The re-ranker's worst-case LLM tokens for one retrieval; 0 without one.
+     */
+    public function rerankTokenCeiling(): int
+    {
+        return $this->reranker?->tokenCeiling(max($this->topK, $this->rerankCandidates)) ?? 0;
+    }
+
+    /**
+     * Vector search, plus keyword search and fusion when hybrid.
+     *
+     * @param  list<int>|null  $documentIds
+     * @return list<RetrievedChunk>
+     */
+    private function firstStage(string $query, ?array $documentIds, int $limit): array
+    {
         $queryVector = $this->embeddings->embedQuery($query);
 
         $vectorHits = array_values(array_filter(
@@ -59,7 +110,7 @@ class Retriever
                 $chunk->score = (float) $chunk->similarity;
             }
 
-            return array_slice($vectorHits, 0, $this->topK);
+            return array_slice($vectorHits, 0, $limit);
         }
 
         $keywordHits = $this->store->keywordSearch($query, $this->candidates, $documentIds);
@@ -68,7 +119,7 @@ class Retriever
             ? $this->fuseByRank([$vectorHits, $keywordHits])
             : $this->fuseByScore($vectorHits, $keywordHits);
 
-        return array_slice($fused, 0, $this->topK);
+        return array_slice($fused, 0, $limit);
     }
 
     /**
