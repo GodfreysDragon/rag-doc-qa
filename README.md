@@ -17,7 +17,7 @@ The retrieval pipeline is built by hand rather than with a hosted "chat with you
 
 ```
 INDEX TIME (queued job)
-  upload ─► extract text per page ─► recursive chunking (≈300 tokens, 50 overlap)
+  upload ─► extract text per page ─► heading-aware chunking (≈300 tokens, 50 overlap)
          ─► embed chunks (input_type=document) ─► pgvector column + HNSW index
                                                  └► generated tsvector + GIN index
 
@@ -34,7 +34,7 @@ QUERY TIME (SSE stream)
 
 | Concern | Choice | Why |
 |---|---|---|
-| **Chunking** | Recursive splitter (paragraph → line → sentence → word) with overlap; chunks never cross a page | Keeps chunks semantically whole, and every chunk has one page number to cite. Overlap means a sentence on a boundary can be found from either side. |
+| **Chunking** | Markdown sections are packed whole into chunks; a section too long for one chunk is split recursively (paragraph → line → sentence → word) with overlap, and each later piece opens with its heading trail (`Policy › Using your own car`). Chunks never cross a page | Keeps chunks semantically whole, so a chunk never ends on a heading whose text is in the next one, and a piece cut from the middle of a section still says what it is about. Every chunk has one page number to cite. |
 | **What gets embedded** | `"Document: <title>\n\n<chunk>"` | A chunk that just says "the fee is 3%" is much easier to find when its vector also carries which document it came from. Only the chunk text is stored and shown. |
 | **Asymmetric embeddings** | Separate `embedDocuments()` / `embedQuery()` | Retrieval models (Voyage `input_type`, nomic `search_query:` prefixes) encode short questions and long passages differently. |
 | **Normalisation** | Every vector is L2-normalised before storage | Cosine similarity becomes a dot product, which the PHP fallback relies on. |
@@ -160,7 +160,7 @@ php artisan rag:reindex --queue    # dispatch to the queue instead of running in
 php artisan rag:eval               # retrieval quality on the golden set (see below)
 php artisan rag:eval --misses      # …and list the questions hybrid search missed
 php artisan rag:eval-answers       # answer quality with the real LLM and an LLM judge (costs tokens)
-php artisan test                   # 65 tests, no network calls
+php artisan test                   # 69 tests, no network calls
 ```
 
 ## Retrieval evaluation
@@ -215,7 +215,7 @@ What this shows:
 - **Retrieval is the bottleneck, not generation.** Every wrong answer was a question whose passage wasn't retrieved, and in all three Claude said it couldn't find the answer instead of guessing. When the passage was retrieved, the answer was right 53 times out of 53.
 - **No made-up answers.** All 8 unanswerable questions got "the documents don't say", and no answer cited a source that doesn't exist.
 - **The one unfaithful answer** added a side remark the sources didn't support (that the mower has no Eco mode) to an otherwise correct answer.
-- **A chunking issue showed up.** For "Will the company pay my speeding ticket?" the model noticed that a retrieved chunk ended at the heading "Using your own car", with the rules in the next chunk. Keeping headings attached to the text that follows them would fix that.
+- **A chunking issue showed up.** For "Will the company pay my speeding ticket?" the model noticed that a retrieved chunk ended at the heading "Using your own car", with the rules in the next chunk. The chunker now packs whole Markdown sections and never ends a chunk on a heading.
 
 Caveat: the judge is the same model that wrote the answers, so it may be lenient towards its own style. A different judge model, or spot-checking verdicts by hand with `--failures`, guards against that.
 
@@ -229,7 +229,6 @@ All tunables are in [`config/rag.php`](config/rag.php): chunk size and overlap, 
 - **Accounts are basic**: email and password only, with no email verification, password reset or roles. Documents uploaded before accounts existed have no owner, and nobody sees them until they're assigned a `user_id`.
 - **Token budget granularity**: the budget is checked before an answer starts, so the last answer of the day can overshoot it. Query-rewrite calls aren't counted, because the model reports usage only for the streamed answer.
 - **Re-ranking**: a cross-encoder re-ranker (e.g. Voyage `rerank-2.5`) over the fused top-20 would sharpen precision further.
-- **Headings in chunks**: the answer evaluation found a chunk ending at a section heading, with the section's text in the next chunk. Carrying the nearest heading into each chunk (or never ending a chunk on one) would keep sections together.
 - **Weighted fusion**: with `nomic-embed-text`, equal-weight RRF costs paraphrase accuracy (see the evaluation). Per-ranking weights in `Retriever::fuse()`, tuned with `rag:eval` on a bigger golden set, would let hybrid keep the vector ranking's paraphrase wins.
 - **Bigger golden set**: 56 questions over 17 chunks is enough to compare modes, but too small to tune `top_k` or chunk size. A larger corpus would make Hit@k meaningful.
 - **Filtered HNSW**: when scoping to a few documents on a large corpus, enable pgvector ≥ 0.8 iterative scans (`SET hnsw.iterative_scan = relaxed_order`).
