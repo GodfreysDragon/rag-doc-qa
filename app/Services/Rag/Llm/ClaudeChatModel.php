@@ -75,7 +75,12 @@ class ClaudeChatModel implements ChatModel
         ];
     }
 
-    public function complete(string $system, array $messages, int $maxTokens = 2000): string
+    public function withModel(string $model): ChatModel
+    {
+        return new self($this->client, $model, $this->effort, $this->maxTokens);
+    }
+
+    public function complete(string $system, array $messages, int $maxTokens = 2000): Completion
     {
         $message = $this->client->beta->messages->create(
             maxTokens: $maxTokens,
@@ -87,18 +92,16 @@ class ClaudeChatModel implements ChatModel
             betas: [self::FALLBACK_BETA],
         );
 
-        if ($message->stopReason === 'refusal') {
-            return '';
-        }
-
         $text = '';
 
-        foreach ($message->content as $block) {
-            if ($block->type === 'text') {
-                $text .= $block->text;
+        if ($message->stopReason !== 'refusal') {
+            foreach ($message->content as $block) {
+                if ($block->type === 'text') {
+                    $text .= $block->text;
+                }
             }
         }
 
-        return trim($text);
+        return new Completion(trim($text), $message->usage->inputTokens, $message->usage->outputTokens);
     }
 }

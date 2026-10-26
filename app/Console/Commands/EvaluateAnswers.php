@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Providers\AppServiceProvider;
 use App\Services\Rag\Embeddings\EmbeddingProvider;
 use App\Services\Rag\Evaluation\AnswerEvaluator;
 use Illuminate\Console\Attributes\Description;
@@ -11,6 +12,7 @@ use Illuminate\Console\Command;
 #[Signature('rag:eval-answers
     {--set= : Path to a golden-set JSON file; its corpus is read from a corpus/ folder next to it}
     {--limit= : Only evaluate the first N answerable and N unanswerable questions}
+    {--judge= : Model that grades the answers (defaults to rag.evaluation.judge_model)}
     {--failures : List the answers the judge marked incorrect or unfaithful}
     {--json : Print the results as JSON instead of tables}')]
 #[Description('Measure answer quality (correctness, faithfulness, citations, abstention) with the real LLM and an LLM judge')]
@@ -19,8 +21,13 @@ class EvaluateAnswers extends Command
     /**
      * Execute the console command.
      */
-    public function handle(AnswerEvaluator $evaluator, EmbeddingProvider $embeddings): int
+    public function handle(EmbeddingProvider $embeddings): int
     {
+        if ($this->option('judge')) {
+            config(['rag.evaluation.judge_model' => $this->option('judge')]);
+        }
+
+        $judgeModel = AppServiceProvider::judgeModel();
         $setPath = $this->option('set') ?: resource_path('eval/questions.json');
 
         if (! is_file($setPath)) {
@@ -45,13 +52,14 @@ class EvaluateAnswers extends Command
             ));
         }
 
-        ['chunk_count' => $chunkCount, 'results' => $results] = $evaluator->evaluate($corpusFiles, $cases, $unanswerable);
+        ['chunk_count' => $chunkCount, 'results' => $results] = app(AnswerEvaluator::class)->evaluate($corpusFiles, $cases, $unanswerable);
         $metrics = AnswerEvaluator::metrics($results);
 
         if ($this->option('json')) {
             $this->line(json_encode([
                 'embedding_model' => $embeddings->modelName(),
                 'chat_model' => config('rag.llm.model'),
+                'judge_model' => $judgeModel,
                 'chunk_count' => $chunkCount,
                 'metrics' => $metrics,
                 'results' => $results,
@@ -61,12 +69,13 @@ class EvaluateAnswers extends Command
         }
 
         $this->components->info(sprintf(
-            'Answered %d questions over %d documents (%d chunks) with [%s] embeddings and [%s].',
+            'Answered %d questions over %d documents (%d chunks) with [%s] embeddings and [%s], judged by [%s].',
             count($results),
             count($corpusFiles),
             $chunkCount,
             $embeddings->modelName(),
             config('rag.llm.model'),
+            $judgeModel,
         ));
 
         $this->table(['Metric', 'Value', 'What it measures'], [

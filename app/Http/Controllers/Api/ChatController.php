@@ -21,37 +21,47 @@ class ChatController extends Controller
     /**
      * Answer a question over the user's documents as a Server-Sent Events
      * stream: `query` → `sources` → many `text` → `done` (or `error`).
-     * Refused with 429 once the daily token budget is spent.
+     * Refused with 429 when the question's worst-case cost doesn't fit in
+     * what's left of the daily token budget.
      */
     public function __invoke(AskQuestionRequest $request, DocumentChat $chat, TokenBudget $budget): StreamedResponse|JsonResponse
     {
         $user = $request->user();
+        $question = $request->validated('question');
+        $history = $request->validated('history', []);
+        $documentIds = $request->documentIds();
+        $reserved = $chat->tokenCeiling($question, $history);
 
-        if ($budget->isExhausted($user)) {
+        if (! $budget->reserve($user, $reserved)) {
             return response()->json([
                 'message' => 'The daily usage limit has been reached. Please try again tomorrow.',
             ], Response::HTTP_TOO_MANY_REQUESTS);
         }
 
-        $question = $request->validated('question');
-        $history = $request->validated('history', []);
-        $documentIds = $request->documentIds();
+        return response()->stream(function () use ($chat, $budget, $user, $question, $history, $documentIds, $reserved): void {
+            $settled = false;
 
-        return response()->stream(function () use ($chat, $budget, $user, $question, $history, $documentIds): void {
             try {
                 foreach ($chat->answer($question, $history, $documentIds) as $event) {
                     if ($event['type'] === 'done') {
-                        $budget->record($user, ($event['usage']['input_tokens'] ?? 0) + ($event['usage']['output_tokens'] ?? 0));
+                        $budget->settle($user, $reserved, ($event['usage']['input_tokens'] ?? 0) + ($event['usage']['output_tokens'] ?? 0));
+                        $settled = true;
                     }
 
                     $this->send($event);
 
+                    // A client that disconnects mid-answer keeps its whole reservation, since the real usage is unknown.
                     if (connection_aborted()) {
                         return;
                     }
                 }
             } catch (Throwable $exception) {
                 Log::error('Chat stream failed.', ['exception' => $exception]);
+
+                // Most failures happen before the model produces anything, so the reservation is released.
+                if (! $settled) {
+                    $budget->settle($user, $reserved, 0);
+                }
 
                 $this->send(['type' => 'error', 'message' => $this->errorMessage($exception)]);
             }

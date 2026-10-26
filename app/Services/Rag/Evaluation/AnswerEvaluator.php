@@ -171,7 +171,7 @@ class AnswerEvaluator
         ]);
 
         try {
-            $reply = $this->judge->complete(self::JUDGE_PROMPT, [['role' => 'user', 'content' => $prompt]], maxTokens: 500);
+            $reply = $this->judge->complete(self::JUDGE_PROMPT, [['role' => 'user', 'content' => $prompt]], maxTokens: 500)->text;
         } catch (Throwable) {
             return null;
         }

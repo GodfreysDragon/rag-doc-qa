@@ -119,6 +119,29 @@ class AnswerEvaluationTest extends TestCase
         $this->assertSame(1, $report['metrics']['unanswerable']);
     }
 
+    public function test_answers_are_judged_by_a_different_model_than_the_one_answering(): void
+    {
+        config(['rag.llm.model' => 'answer-model', 'rag.evaluation.judge_model' => 'judge-model']);
+
+        $this->evaluate([self::CASE]);
+
+        $this->assertSame(['judge-model'], $this->llm->models);
+    }
+
+    public function test_the_judge_can_be_chosen_per_run_or_fall_back_to_the_answer_model(): void
+    {
+        config(['rag.llm.model' => 'answer-model', 'rag.evaluation.judge_model' => 'judge-model']);
+
+        Artisan::call('rag:eval-answers', ['--json' => true, '--limit' => 1, '--judge' => 'other-judge']);
+        $this->assertSame('other-judge', json_decode(Artisan::output(), true)['judge_model']);
+
+        config(['rag.evaluation.judge_model' => '']);
+        Artisan::call('rag:eval-answers', ['--json' => true, '--limit' => 1]);
+        $this->assertSame('answer-model', json_decode(Artisan::output(), true)['judge_model']);
+
+        $this->assertSame(['other-judge', 'answer-model'], $this->llm->models);
+    }
+
     /**
      * @param  list<array{category: string, question: string, document: string, expect: string}>  $cases
      * @param  list<string>  $unanswerable

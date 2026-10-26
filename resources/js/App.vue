@@ -12,6 +12,12 @@ onMounted(auth.load);
 <template>
     <div v-if="auth.checking.value" class="grid h-full place-items-center text-sm text-muted">Loading…</div>
     <!-- Keyed by user, so signing out and back in starts a fresh workspace (no stale chat or documents). -->
-    <Workspace v-else-if="auth.user.value" :key="auth.user.value.id" :user="auth.user.value" @sign-out="auth.logout" />
+    <Workspace
+        v-else-if="auth.user.value"
+        :key="auth.user.value.id"
+        :user="auth.user.value"
+        :delete-account="auth.deleteAccount"
+        @sign-out="auth.logout"
+    />
     <SignIn v-else :login="auth.login" :register="auth.register" />
 </template>

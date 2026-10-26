@@ -14,12 +14,13 @@ use InvalidArgumentException;
  *
  * The corpus is indexed by EvaluationCorpus inside a transaction that is
  * always rolled back. Each question is then run through vector-only,
- * keyword-only and hybrid retrieval, recording the rank of the first chunk
+ * keyword-only and both kinds of hybrid retrieval (rank fusion and weighted
+ * score fusion), recording the rank of the first chunk
  * that comes from the expected document and contains the expected phrase.
  */
 class RetrievalEvaluator
 {
-    public const MODES = ['vector', 'keyword', 'hybrid'];
+    public const MODES = ['vector', 'keyword', 'rrf', 'weighted'];
 
     public function __construct(
         private readonly EvaluationCorpus $corpus,
@@ -32,17 +33,21 @@ class RetrievalEvaluator
      * @param  list<array{category: string, question: string, document: string, expect: string}>  $cases
      * @return array{chunk_count: int, results: list<array{category: string, question: string, document: string, expect: string, ranks: array<string, int|null>}>}
      */
-    public function evaluate(array $corpusFiles, array $cases, int $topK, int $candidates, int $rrfK): array
+    public function evaluate(array $corpusFiles, array $cases, int $topK, int $candidates, int $rrfK, float $vectorWeight): array
     {
-        return $this->corpus->using($corpusFiles, function (array $documentIds, int $chunkCount) use ($cases, $topK, $candidates, $rrfK): array {
+        return $this->corpus->using($corpusFiles, function (array $documentIds, int $chunkCount) use ($cases, $topK, $candidates, $rrfK, $vectorWeight): array {
             $scope = array_values($documentIds);
+
+            $hybrid = fn (string $fusion): Retriever => new Retriever(
+                $this->embeddings, $this->store, topK: $topK, candidates: $candidates, rrfK: $rrfK, fusion: $fusion, vectorWeight: $vectorWeight,
+            );
 
             $retrievers = [
                 'vector' => fn (string $question): array => (new Retriever($this->embeddings, $this->store, topK: $topK, candidates: $candidates, hybrid: false))
                     ->retrieve($question, $scope),
                 'keyword' => fn (string $question): array => array_slice($this->store->keywordSearch($question, $candidates, $scope), 0, $topK),
-                'hybrid' => fn (string $question): array => (new Retriever($this->embeddings, $this->store, topK: $topK, candidates: $candidates, hybrid: true, rrfK: $rrfK))
-                    ->retrieve($question, $scope),
+                'rrf' => fn (string $question): array => $hybrid('rrf')->retrieve($question, $scope),
+                'weighted' => fn (string $question): array => $hybrid('weighted')->retrieve($question, $scope),
             ];
 
             $results = [];

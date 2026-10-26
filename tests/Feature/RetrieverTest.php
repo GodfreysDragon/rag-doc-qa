@@ -14,6 +14,7 @@ use App\Services\Rag\VectorStores\PgvectorStore;
 use App\Services\Rag\VectorStores\VectorStore;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\DB;
+use InvalidArgumentException;
 use Tests\TestCase;
 
 class RetrieverTest extends TestCase
@@ -130,13 +131,58 @@ class RetrieverTest extends TestCase
         $chunk = fn (int $id): RetrievedChunk => new RetrievedChunk($id, 1, 'Doc', null, "chunk {$id}");
         $retriever = new Retriever(app(EmbeddingProvider::class), app(VectorStore::class), rrfK: 60);
 
-        $fused = $retriever->fuse([
+        $fused = $retriever->fuseByRank([
             [$chunk(1), $chunk(2), $chunk(3)],
             [$chunk(3), $chunk(4), $chunk(1)],
         ]);
 
         $this->assertSame([1, 3, 2, 4], array_map(fn (RetrievedChunk $c) => $c->chunkId, $fused));
         $this->assertEqualsWithDelta(1 / 61 + 1 / 63, $fused[0]->score, 1e-9);
+    }
+
+    public function test_weighted_fusion_keeps_a_clear_vector_winner_on_top(): void
+    {
+        $vector = fn (int $id, float $similarity): RetrievedChunk => new RetrievedChunk($id, 1, 'Doc', null, "chunk {$id}", similarity: $similarity);
+        $keyword = fn (int $id, float $score): RetrievedChunk => new RetrievedChunk($id, 1, 'Doc', null, "chunk {$id}", keywordScore: $score);
+        $vectorHits = fn (): array => [$vector(1, 0.9), $vector(2, 0.5), $vector(3, 0.4)];
+        $keywordHits = fn (): array => [$keyword(2, 1.0), $keyword(3, 0.9), $keyword(4, 0.1)];
+        $retriever = new Retriever(app(EmbeddingProvider::class), app(VectorStore::class), vectorWeight: 0.6);
+
+        $fused = $retriever->fuseByScore($vectorHits(), $keywordHits());
+
+        // Chunk 1 is the best vector hit by far and has no keyword match; chunk 2 is mediocre on both.
+        $this->assertSame([1, 2, 3, 4], array_map(fn (RetrievedChunk $c) => $c->chunkId, $fused));
+        $this->assertEqualsWithDelta(0.6, $fused[0]->score, 1e-9);
+        $this->assertEqualsWithDelta(0.6 * 0.2 + 0.4 * 1.0, $fused[1]->score, 1e-9);
+        $this->assertSame(0.5, $fused[1]->similarity);
+        $this->assertSame(1.0, $fused[1]->keywordScore);
+
+        // Rank fusion rewards appearing in both lists, so it puts chunk 2 first.
+        $this->assertSame(2, $retriever->fuseByRank([$vectorHits(), $keywordHits()])[0]->chunkId);
+    }
+
+    public function test_weighted_fusion_scores_a_lone_hit_as_the_best_on_its_side(): void
+    {
+        $retriever = new Retriever(app(EmbeddingProvider::class), app(VectorStore::class), vectorWeight: 0.7);
+
+        $fused = $retriever->fuseByScore([], [new RetrievedChunk(5, 1, 'Doc', null, 'chunk 5', keywordScore: 0.02)]);
+
+        $this->assertCount(1, $fused);
+        $this->assertEqualsWithDelta(0.3, $fused[0]->score, 1e-9);
+    }
+
+    public function test_the_configured_fusion_is_used_and_validated(): void
+    {
+        $this->index('Company Policy', self::POLICY);
+        config(['rag.retrieval.fusion' => 'rrf']);
+
+        $results = app(Retriever::class)->retrieve('refund within 30 days');
+
+        $this->assertStringContainsString('refund', $results[0]->content);
+        $this->assertLessThan(1 / 30, $results[0]->score, 'RRF scores are sums of 1 / (60 + rank).');
+
+        $this->expectException(InvalidArgumentException::class);
+        new Retriever(app(EmbeddingProvider::class), app(VectorStore::class), fusion: 'average');
     }
 
     public function test_hash_embeddings_are_normalised(): void

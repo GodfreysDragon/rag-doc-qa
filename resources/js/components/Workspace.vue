@@ -4,9 +4,11 @@ import ChatPanel from './ChatPanel.vue';
 import DocumentSidebar from './DocumentSidebar.vue';
 import { useChat } from '../composables/useChat';
 import { useDocuments } from '../composables/useDocuments';
+import { api } from '../lib/api';
 
-defineProps({
+const props = defineProps({
     user: { type: Object, required: true },
+    deleteAccount: { type: Function, required: true },
 });
 
 const emit = defineEmits(['sign-out']);
@@ -41,7 +43,26 @@ function signOut() {
     emit('sign-out');
 }
 
-onMounted(docs.load);
+async function deleteAccount(password) {
+    chat.stop();
+    await props.deleteAccount(password);
+}
+
+const resent = ref(false);
+
+async function resendVerification() {
+    await api.resendVerification();
+    resent.value = true;
+}
+
+onMounted(() => {
+    // Arriving from the verification link (/?verified=1): tidy the URL.
+    if (new URLSearchParams(window.location.search).has('verified')) {
+        window.history.replaceState(null, '', '/');
+    }
+
+    docs.load();
+});
 </script>
 
 <template>
@@ -70,11 +91,22 @@ onMounted(docs.load);
                 @reprocess="docs.reprocess"
                 @toggle="toggleSelected"
                 @clear-selection="selectedIds = new Set()"
+                :delete-account="deleteAccount"
                 @sign-out="signOut"
             />
         </aside>
 
         <main class="flex min-w-0 flex-1 flex-col">
+            <div
+                v-if="user.verification_required && !user.email_verified"
+                class="border-b border-amber-300 bg-amber-50 px-4 py-2.5 text-xs text-amber-900 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-200"
+                role="status"
+            >
+                Confirm your email address to upload documents and ask questions. We sent a link to {{ user.email }}.
+                <button type="button" class="ml-1 font-medium underline disabled:no-underline disabled:opacity-60" :disabled="resent" @click="resendVerification">
+                    {{ resent ? 'Sent' : 'Send it again' }}
+                </button>
+            </div>
             <ChatPanel
                 :messages="chat.messages.value"
                 :is-streaming="chat.isStreaming.value"

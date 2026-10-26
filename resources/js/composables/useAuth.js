@@ -30,9 +30,14 @@ export function useAuth() {
         }
     }
 
+    async function deleteAccount(password) {
+        await api.deleteAccount(password);
+        user.value = null;
+    }
+
     // Any request that comes back 401 (an expired session) returns to the sign-in screen.
     const stopListening = onSignedOut(() => (user.value = null));
     onBeforeUnmount(stopListening);
 
-    return { user, checking, load, login, register, logout };
+    return { user, checking, load, login, register, logout, deleteAccount };
 }

@@ -21,9 +21,15 @@ interface ChatModel
     public function stream(string $system, array $messages): Generator;
 
     /**
-     * Single non-streaming completion returning the text of the reply.
+     * Single non-streaming completion: the text of the reply (empty if the
+     * model declined) and the tokens it used.
      *
      * @param  list<array{role: 'user'|'assistant', content: string}>  $messages
      */
-    public function complete(string $system, array $messages, int $maxTokens = 2000): string;
+    public function complete(string $system, array $messages, int $maxTokens = 2000): Completion;
+
+    /**
+     * The same client and settings, talking to another model.
+     */
+    public function withModel(string $model): ChatModel;
 }
